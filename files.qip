@@ -10,5 +10,3 @@ set_global_assignment -name VHDL_FILE rtl/T65.vhd
 set_global_assignment -name VHDL_FILE rtl/asteroids_vg.vhd
 set_global_assignment -name VHDL_FILE rtl/asteroids_top.vhd
 set_global_assignment -name VHDL_FILE rtl/asteroids.vhd
-set_global_assignment -name VERILOG_FILE rtl/joydb9md.v
-set_global_assignment -name VERILOG_FILE rtl/joydb15.v
