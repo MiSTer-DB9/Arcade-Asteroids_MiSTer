@@ -3,9 +3,8 @@
 //
 //  Written 2026 by Videodr0me
 //
-//  Captures the CPU sound controls, reconstructs the main-board sound
-//  circuits, and applies the regulator/audio-board and speaker-load response.
-//  All timing remains in the 12.096 MHz master-clock domain.
+//  Reconstructs the game-board sound circuits, mixes Asteroids Deluxe POKEY
+//  audio, and applies the optional board and cabinet filters at 48 kHz.
 //============================================================================
 
 module asteroids_audio

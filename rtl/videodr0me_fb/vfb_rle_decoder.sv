@@ -17,9 +17,9 @@
 //   0xF: black run, [11:0]=count-1. Odd SDR packer filler words are excluded
 //        by the descriptor word count before they reach the decoder.
 //
-// Compressed words are parsed into a small run FIFO ahead of the pixel
-// consumer. This keeps two-word full-RGB literals away from the pixel edge:
-// rgb_out is always the current head pixel before advance is asserted.
+// Complete runs enter a small FIFO so two-word RGB literals still sustain
+// one output pixel per clock. rgb_out presents the current pixel; advance
+// consumes it.
 // ============================================================================
 
 module vfb_rle_decoder (
@@ -108,9 +108,8 @@ module vfb_rle_decoder (
 	logic [12:0] fifo_push_count;
 	logic fifo_push_eol;
 
-	// Holding the outer FIFO head for one cycle when this queue is full keeps
-	// pixel advance out of the upstream FIFO pointer path. When an advance
-	// consumes the FIFO head, token intake resumes on the following clock.
+	// If this queue fills, hold the source word until one run completes.
+	// Input resumes on the following clock.
 	assign token_ready = !fifo_full;
 
 	always_comb begin
@@ -124,7 +123,6 @@ module vfb_rle_decoder (
 				PARSE_WORD: begin
 					case (token_data[15:12])
 						4'h0: begin
-							// First half of a full RGB literal.
 						end
 						4'h1, 4'h2, 4'h3, 4'h4,
 						4'h5, 4'h6, 4'h7: begin

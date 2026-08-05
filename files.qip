@@ -9,6 +9,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/dvg/asteroids_dvg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/dvg/asteroids_dvg_shadow.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/atari_er2055.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/atari_pokey_filter.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/asteroids_spinner_input.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/llander_thrust_input.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/llander_audio_board.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/asteroids_audio_board.sv
@@ -19,6 +20,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/asteroids_geometry.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/asteroids_video.sv
 set_global_assignment -name VERILOG_FILE rtl/pause.v
 
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_layout_pkg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_rasterizer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_phosphor_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_phosphor_compositor.sv
@@ -30,6 +32,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_blur.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_filter.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_rle_encoder.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_rle_decoder.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_async_fifo.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_sync_fifo.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_sdram_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_sdram_delay.sv
@@ -37,6 +40,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_halo_wide.s
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_profile_resolver.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_final_present.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_halo_pipeline.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_tone_mapper.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/videodr0me_fb/vfb_top.sv
 

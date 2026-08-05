@@ -41,7 +41,7 @@ module asteroids_geometry
 
 	always_comb begin
 		centered_x = $signed({1'b0, source_x}) - 24'sd1024;
-		// Shadow-DVG coordinates double MAME's 118-unit Lunar viewport offset.
+		// Lunar Lander uses source Y=788 as its center; Asteroids uses Y=1024.
 		centered_y = $signed({1'b0, source_y}) -
 		             (game_is_lander ? 24'sd788 : 24'sd1024);
 		quarter_turn = (orientation == 3'd1) ||

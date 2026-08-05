@@ -3,9 +3,7 @@
 //
 //  Written 2026 by Videodr0me
 //
-//  Models the seven discrete sound sources and the LM324 summing stage. A
-//  serialized fixed-point engine performs the analog filters and resistor
-//  weighted mix between 48 kHz samples.
+//  Recreates the seven discrete sound sources and the LM324 summing stage.
 //============================================================================
 
 module asteroids_audio_board
@@ -223,7 +221,7 @@ module asteroids_audio_board
 
 	function automatic logic [7:0] ship_fire_duty(input logic [31:0] increment);
 		begin
-			// The schematic 555 duty is approximately 67% + 2250/f.
+			// The schematic gives an approximate duty cycle of 67% + 2250/frequency.
 			if      (increment >= 32'd67108864) ship_fire_duty = 8'd179;
 			else if (increment >= 32'd58161015) ship_fire_duty = 8'd180;
 			else if (increment >= 32'd49213167) ship_fire_duty = 8'd181;

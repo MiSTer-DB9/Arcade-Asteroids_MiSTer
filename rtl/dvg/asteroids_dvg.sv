@@ -3,9 +3,9 @@
 //
 //  Written 2026 by Videodr0me
 //
-//  PROM-driven DVG sequencer with the original cascaded rate-multiplier
-//  behavior. Vector-memory requests use a tagged response contract so CPU
-//  accesses can retain hardware priority without corrupting a DVG fetch.
+//  PROM-driven DVG sequencer with the original cascaded rate multipliers.
+//  An explicit memory response-valid handshake keeps CPU-priority accesses
+//  from misaligning DVG fetches.
 //============================================================================
 
 module asteroids_dvg
@@ -205,7 +205,7 @@ module asteroids_dvg
 			vector_intensity <= 4'd0;
 			vector_is_dot <= 1'b0;
 		end else if (go) begin
-			// VGGO clears HALT and primes the first DVG instruction fetch.
+			// VGGO restarts the sequencer by clearing HALT and pending fetch or draw state.
 			halt_flag <= 1'b0;
 			opcode <= 4'd0;
 			delta_y <= 12'd0;
@@ -228,8 +228,9 @@ module asteroids_dvg
 				rate_counter <= rate_counter + 1'b1;
 				draw_steps <= draw_steps - 1'b1;
 			end else if (!halt_flag) begin
-				// The final coordinate was visible throughout the preceding DVG
-				// tick. Continue the PROM sequence without an extra idle tick.
+				// The final coordinate remains active for a complete DVG tick. The
+				// following tick clears draw_active and advances the PROM without
+				// adding another idle interval.
 				if (draw_active)
 					draw_active <= 1'b0;
 				if (next_action && !response_pending) begin

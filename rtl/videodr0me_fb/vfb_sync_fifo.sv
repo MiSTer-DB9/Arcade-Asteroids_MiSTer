@@ -1,9 +1,6 @@
 // ============================================================================
-// Small single-clock first-word-fall-through FIFO with registered front words.
+// Single-clock FIFO with registered head and lookahead words.
 // written 2026 by Videodr0me
-//
-// SDRAM path keeps a registered head and a
-// registered lookahead word.
 // ============================================================================
 
 module vfb_sync_fifo #(

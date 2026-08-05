@@ -3,8 +3,8 @@
 //
 //  Written 2026 by Videodr0me
 //
-//  Replays each native DVG vector at twice the coordinate and step density.
-//  The PROM sequencer remains the sole authority for vector timing and state.
+//  Re-rasterizes each DVG vector at twice the coordinate and step density
+//  without changing PROM timing.
 //============================================================================
 
 module asteroids_dvg_shadow

@@ -2,9 +2,8 @@
 // RLE-compressed scanline delay in the MiSTer SDRAM.
 // written 2026 by Videodr0me
 //
-// Active RGB is encoded into independent 8 KiB line slots. The delayed stream
-// is reconstructed against the current horizontal cadence, while VSYNC/VBLANK
-// are selected from the matching delayed line descriptor.
+// Active RGB is encoded into independent 8 KiB line slots. Readout follows
+// current horizontal timing and uses sync and blanking from the matching line.
 // ============================================================================
 
 module vfb_sdram_delay #(
@@ -66,7 +65,9 @@ module vfb_sdram_delay #(
 	localparam [5:0] ARB_QUOTA = 6'd32;
 	localparam integer WRITE_URGENT_LEVEL =
 		(FIFO_DEPTH > 64) ? (FIFO_DEPTH - 32) : (FIFO_DEPTH - 4);
-	localparam integer WRITE_READY_MARGIN = (FIFO_DEPTH > 8) ? 4 : 1;
+	localparam integer WRITE_READY_MARGIN =
+		(FIFO_DEPTH > 16) ? 8 :
+		(FIFO_DEPTH > 8)  ? 4 : 1;
 
 	initial begin
 		if ((SLOT_COUNT & (SLOT_COUNT - 1)) != 0)
@@ -81,7 +82,7 @@ module vfb_sdram_delay #(
 			$error("vfb_sdram_delay DELAY_LINES must be below SLOT_COUNT");
 	end
 
-	// Scanline framing and RLE encode
+	// Detect lines and encode RGB.
 	logic hblank_d;
 	logic line_had_pixels;
 	logic line_vsync;
@@ -123,9 +124,8 @@ module vfb_sdram_delay #(
 		.overflow(enc_overflow)
 	);
 
-	// Queued RLE pairs carry their destination slot and word index, allowing the
-	// writer to stream a line before its final token has been seen while minimizing
-	// FIFO usage.
+	// Each queued 32-bit word carries its line slot and word index, so writing
+	// can begin before the line ends.
 	logic write_fifo_full;
 	logic write_fifo_empty;
 	logic [WRITE_FIFO_W-1:0] write_fifo_data;
@@ -135,9 +135,13 @@ module vfb_sdram_delay #(
 	logic [PAIR_W-1:0] pack_pending_pair_index;
 	logic [SLOT_W-1:0] pack_pending_slot;
 	logic write_fifo_room_q;
+	logic encoder_fifo_room_q;
+	logic write_pair_valid_q;
+	logic [WRITE_FIFO_W-1:0] write_pair_data_q;
 	wire enc_word_writes_pair = pack_pending_valid || enc_token_eol;
-	wire write_fifo_push =
+	wire write_pair_accept =
 		enc_token_valid && enc_token_ready && enc_word_writes_pair;
+	wire write_fifo_push = write_pair_valid_q;
 	wire [31:0] write_fifo_pair_data =
 		pack_pending_valid
 			? {enc_token_data, pack_pending_word}
@@ -148,6 +152,12 @@ module vfb_sdram_delay #(
 			: encode_word_index[WORD_W-1:1];
 	wire [SLOT_W-1:0] write_fifo_pair_slot =
 		pack_pending_valid ? pack_pending_slot : encode_slot;
+	wire [WRITE_FIFO_W-1:0] write_pair_data = {
+		enc_token_eol,
+		write_fifo_pair_slot,
+		write_fifo_pair_index,
+		write_fifo_pair_data
+	};
 	wire [WORD_W:0] packed_line_words =
 		{1'b0, encode_word_index} + {{WORD_W{1'b0}}, 1'b1};
 	wire write_fifo_pop;
@@ -159,8 +169,8 @@ module vfb_sdram_delay #(
 	wire write_head_consume;
 
 	assign enc_token_ready =
-		pack_pending_valid ? write_fifo_room_q :
-		enc_token_eol     ? write_fifo_room_q :
+		pack_pending_valid ? encoder_fifo_room_q :
+		enc_token_eol     ? encoder_fifo_room_q :
 		                    1'b1;
 
 	vfb_sync_fifo #(
@@ -170,8 +180,7 @@ module vfb_sdram_delay #(
 		.clk_sys(clk_sys),
 		.reset(reset),
 		.wr_en(write_fifo_push),
-		.wr_data({enc_token_eol, write_fifo_pair_slot,
-		          write_fifo_pair_index, write_fifo_pair_data}),
+		.wr_data(write_pair_data_q),
 		.full(write_fifo_full),
 		.rd_en(write_fifo_pop),
 		.rd_data(write_fifo_data),
@@ -179,13 +188,20 @@ module vfb_sdram_delay #(
 		.used(write_fifo_used)
 	);
 
-	// Near-full guard controls encoder backpressure.
+	// Register the available-space checks and reserve room for the staged write pair.
 	always_ff @(posedge clk_sys) begin
-		if (reset)
+		if (reset) begin
 			write_fifo_room_q <= 1'b0;
-		else
+			encoder_fifo_room_q <= 1'b0;
+			write_pair_valid_q <= 1'b0;
+		end else begin
 			write_fifo_room_q <=
 				(write_fifo_used < (FIFO_DEPTH - WRITE_READY_MARGIN));
+			encoder_fifo_room_q <= write_fifo_room_q;
+			write_pair_valid_q <= write_pair_accept;
+			if (write_pair_accept)
+				write_pair_data_q <= write_pair_data;
+		end
 	end
 
 	assign write_fifo_pop =
@@ -223,6 +239,10 @@ module vfb_sdram_delay #(
 	logic [SLOT_W-1:0] finalize_slot;
 	logic finalize_vsync;
 	logic finalize_vblank;
+	logic blank_finalize_pending;
+	logic [SLOT_W-1:0] blank_finalize_slot;
+	logic blank_finalize_vsync;
+	logic blank_finalize_vblank;
 	logic descriptor_lookup_pending;
 	logic descriptor_lookup_warmed;
 	logic [SLOT_W-1:0] descriptor_lookup_slot;
@@ -235,11 +255,9 @@ module vfb_sdram_delay #(
 	logic descriptor_apply_valid;
 	logic descriptor_apply_written;
 
-	// Descriptor/read prefetch runs one scanline ahead. A descriptor selected
-	// after line N is for output line N+2; it is first stored in prefetch_line,
-	// moved to pending_line at the next line start, then made visible at the
-	// following line start. This gives the SDRAM reader a whole scanline of
-	// runway without changing the visible delay.
+	// Read preparation runs one line ahead. A selected line enters prefetch_line,
+	// moves to pending_line at the next line start, and is shown at the following
+	// line start.
 	logic prefetch_line_valid;
 	logic prefetch_line_vsync;
 	logic prefetch_line_vblank;
@@ -260,7 +278,7 @@ module vfb_sdram_delay #(
 	wire delay_warmed =
 		delay_warmed_r || delay_warmed_now;
 
-	// SDRAM read queue and RLE decode
+	// Read compressed data and decode it.
 	logic read_fifo_full;
 	logic read_fifo_empty;
 	logic [READ_FIFO_W-1:0] read_fifo_data;
@@ -286,10 +304,10 @@ module vfb_sdram_delay #(
 
 	logic read_active;
 	logic [SLOT_W-1:0] read_slot;
-	logic [WORD_W:0] read_word_count;
 	logic [PAIR_W:0] read_pair_count;
 	logic [PAIR_W:0] read_issue_index;
-	logic [PAIR_W:0] read_response_index;
+	logic [PAIR_W:0] read_response_remaining;
+	logic read_words_odd;
 	logic [READ_FIFO_AW:0] read_outstanding;
 	logic read_high_pending;
 	logic [15:0] read_high_word;
@@ -335,16 +353,17 @@ module vfb_sdram_delay #(
 	wire [WORD_W:0] read_start_words =
 		read_start_queued ? read_desc_words[read_desc_rd_ptr]
 		                  : descriptor_apply_words;
+	wire [PAIR_W:0] read_start_pairs =
+		read_start_words[WORD_W:1] +
+		{{PAIR_W{1'b0}}, read_start_words[0]};
 
 	logic [23:0] decoded_rgb;
 	logic decoded_valid;
 	logic decoded_line_done;
 	logic decoder_underflow;
 
-	// The delayed line descriptor becomes visible on the same pixel boundary
-	// as it leaves horizontal blank.  The registered output_line_*
-	// values retain the line after that first pixel; current_line_* is the
-	// coherent view used by both the decoder and the final video pins.
+	// Select the pending descriptor at the active-line boundary and hold it so
+	// decoding and video timing use the same metadata.
 	wire current_line_valid =
 		line_start ? pending_line_valid : output_line_valid;
 	wire current_line_vsync =
@@ -378,8 +397,7 @@ module vfb_sdram_delay #(
 			VGA_HBLANK_OUT <= 1'b1;
 			VGA_VBLANK_OUT <= 1'b1;
 		end else if (ce_pix) begin
-			// decoded_rgb is the pixel available before decoder_advance is
-			// applied on this same clock edge.
+			// Present the current decoded pixel before advancing the decoder.
 			if (current_line_valid && !VGA_HBLANK_IN &&
 			    !current_line_vblank) begin
 				VGA_R_OUT <= decoded_rgb[23:16];
@@ -397,7 +415,7 @@ module vfb_sdram_delay #(
 		end
 	end
 
-	// Open-row SDRAM controller and burst-preserving request arbiter
+	// Open-row SDRAM controller and read/write scheduler.
 	logic        mem_req_valid;
 	logic        mem_req_write;
 	logic [31:0] mem_req_addr;
@@ -574,22 +592,18 @@ module vfb_sdram_delay #(
 		end
 	end
 
-	// Read responses are in request order. Each SDR response contains two
-	// 16-bit compressed words; the descriptor's real word count suppresses the
-	// padded high halfword on odd-length lines.
-	wire [WORD_W:0] read_response_word_base =
-		{read_response_index, 1'b0};
-	wire read_low_real =
-		mem_rsp_valid && (read_response_word_base < read_word_count);
+	// Every requested pair contains a low word. Only the final high word can
+	// be padding when a line contains an odd number of RLE words.
+	wire read_response_last = (read_response_remaining == 1);
 	wire read_high_real =
-		mem_rsp_valid && (read_response_word_base + 1'b1 < read_word_count);
+		mem_rsp_valid && (!read_response_last || !read_words_odd);
 	wire read_low_eol =
-		(read_response_word_base + 1'b1 == read_word_count);
+		read_response_last && read_words_odd;
 	wire read_high_real_eol =
-		(read_response_word_base + 2'd2 == read_word_count);
+		read_response_last && !read_words_odd;
 
 	assign read_fifo_push =
-		(read_high_pending || read_low_real) && !read_fifo_full;
+		(read_high_pending || mem_rsp_valid) && !read_fifo_full;
 	assign read_fifo_write_data = read_high_pending
 		? {read_high_eol, read_high_word}
 		: {read_low_eol, mem_rsp_rdata[15:0]};
@@ -612,6 +626,10 @@ module vfb_sdram_delay #(
 			finalize_slot     <= '0;
 			finalize_vsync    <= 1'b1;
 			finalize_vblank   <= 1'b1;
+			blank_finalize_pending <= 1'b0;
+			blank_finalize_slot <= '0;
+			blank_finalize_vsync <= 1'b1;
+			blank_finalize_vblank <= 1'b1;
 			descriptor_lookup_pending <= 1'b0;
 			descriptor_lookup_warmed <= 1'b0;
 			descriptor_lookup_slot <= '0;
@@ -634,10 +652,10 @@ module vfb_sdram_delay #(
 			output_line_vblank <= 1'b1;
 			read_active       <= 1'b0;
 			read_slot         <= '0;
-			read_word_count   <= '0;
 			read_pair_count   <= '0;
 			read_issue_index  <= '0;
-			read_response_index <= '0;
+			read_response_remaining <= '0;
+			read_words_odd    <= 1'b0;
 			read_outstanding  <= '0;
 			read_high_pending <= 1'b0;
 			read_high_word    <= 16'd0;
@@ -655,6 +673,20 @@ module vfb_sdram_delay #(
 				descriptor_written[slot_i] <= 1'b0;
 			end
 		end else begin
+			if (blank_finalize_pending) begin
+				descriptor_words[blank_finalize_slot] <= '0;
+				descriptor_vsync[blank_finalize_slot] <=
+					blank_finalize_vsync;
+				descriptor_vblank[blank_finalize_slot] <=
+					blank_finalize_vblank;
+				descriptor_valid[blank_finalize_slot] <= 1'b1;
+				descriptor_written[blank_finalize_slot] <= 1'b1;
+				blank_finalize_pending <= 1'b0;
+				encode_slot <= blank_finalize_slot + 1'b1;
+				encode_word_index <= '0;
+				pack_pending_valid <= 1'b0;
+			end
+
 			if (line_start) begin
 				line_had_pixels <= 1'b0;
 				line_vsync  <= VGA_VS_IN;
@@ -758,14 +790,10 @@ module vfb_sdram_delay #(
 
 			if (read_start) begin
 				read_slot <= read_start_slot;
-				read_word_count <= read_start_words;
-				// Number of 32-bit SDR reads needed for the 16-bit RLE words:
-				// ceil(words / 2), explicitly sized to avoid implicit truncation.
-				read_pair_count <=
-					read_start_words[WORD_W:1] +
-					{{PAIR_W{1'b0}}, read_start_words[0]};
+				read_pair_count <= read_start_pairs;
 				read_issue_index <= '0;
-				read_response_index <= '0;
+				read_response_remaining <= read_start_pairs;
+				read_words_odd <= read_start_words[0];
 				read_high_pending <= 1'b0;
 				read_active <= 1'b1;
 			end
@@ -780,14 +808,10 @@ module vfb_sdram_delay #(
 					finalize_vsync <= line_vsync;
 					finalize_vblank <= line_vblank;
 				end else begin
-					descriptor_words[encode_slot] <= '0;
-					descriptor_vsync[encode_slot] <= line_vsync;
-					descriptor_vblank[encode_slot] <= line_vblank;
-					descriptor_valid[encode_slot] <= 1'b1;
-					descriptor_written[encode_slot] <= 1'b1;
-					encode_slot <= encode_slot + 1'b1;
-					encode_word_index <= '0;
-					pack_pending_valid <= 1'b0;
+					blank_finalize_pending <= 1'b1;
+					blank_finalize_slot <= encode_slot;
+					blank_finalize_vsync <= line_vsync;
+					blank_finalize_vblank <= line_vblank;
 				end
 
 				descriptor_lookup_pending <= 1'b1;
@@ -810,15 +834,15 @@ module vfb_sdram_delay #(
 			if (mem_rsp_valid) begin
 				if (read_high_pending)
 					overflow <= 1'b1;
-				if (read_fifo_full && read_low_real)
+				if (read_fifo_full)
 					overflow <= 1'b1;
 				if (read_high_real) begin
 					read_high_pending <= 1'b1;
 					read_high_word <= mem_rsp_rdata[31:16];
 					read_high_eol <= read_high_real_eol;
 				end
-				read_response_index <= read_response_index + 1'b1;
-				if (read_response_index + 1'b1 == read_pair_count)
+				read_response_remaining <= read_response_remaining - 1'b1;
+				if (read_response_last)
 					read_active <= 1'b0;
 			end
 
@@ -827,6 +851,8 @@ module vfb_sdram_delay #(
 			if (decoder_underflow && output_line_valid)
 				underflow <= 1'b1;
 			if (finalize_pending && line_start)
+				overflow <= 1'b1;
+			if (blank_finalize_pending && line_end)
 				overflow <= 1'b1;
 		end
 	end

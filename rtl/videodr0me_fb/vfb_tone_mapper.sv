@@ -14,7 +14,10 @@ module vfb_tone_mapper
 	output logic [7:0] mapped_intensity
 );
 
+	// First-sample inertia bonus is disabled.
+	/*
 	logic beam_on_q = 1'b0;
+	*/
 
 (* romstyle = "logic" *) reg [7:0] z_lut[0:255] = '{default:0};
 initial begin
@@ -80,18 +83,23 @@ end
 	logic [7:0] linear_1_intensity;
 	logic [7:0] linear_2_intensity;
 
+	/*
 	always_ff @(posedge clk_source) begin
 		if (reset)
 			beam_on_q <= 1'b0;
 		else
 			beam_on_q <= beam_on;
 	end
+	*/
 
 	always_comb begin
 		base_intensity = {1'b0, raw_intensity};
+		/*
 		inertia_intensity = (beam_on && !beam_on_q) ?
 		                    base_intensity + (base_intensity >> 2) :
 		                    base_intensity;
+		*/
+		inertia_intensity = base_intensity;
 		conditioned_intensity = (inertia_intensity > 9'd255) ?
 		                        8'd255 : inertia_intensity[7:0];
 

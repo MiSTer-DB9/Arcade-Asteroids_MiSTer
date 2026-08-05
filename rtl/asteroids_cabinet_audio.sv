@@ -3,10 +3,8 @@
 //
 //  Written 2026 by Videodr0me
 //
-//  Models the phase-inverted audio feed, the audible-band TDA2002AV feedback
-//  response, and the effective 500 uF output coupling into an 8-ohm load. The
-//  feedback compensation lies above this model's 48 kHz bandwidth. Acoustic
-//  speaker coloration is not guessed without measured response data.
+//  Models the cabinet amplifier's input, feedback, and 500 uF speaker-coupling
+//  networks at 48 kHz.
 //============================================================================
 
 module asteroids_cabinet_audio

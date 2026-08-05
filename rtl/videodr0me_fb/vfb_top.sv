@@ -6,10 +6,14 @@
 module vfb_top (
 	input         clk_sys,
 	input         clk_12,
+	input         clk_io,
 	input         reset,
-	input         video_timing_reset, // Resyncs readout only; does not clear framebuffer state.
+	input         source_reset,
+	input         ddr_reset,
+	input         upload_reset,
+	input         video_timing_reset, // Resyncs presentation without clearing framebuffer state.
 
-	// Vector inputs (from DVG)
+	// Vector input
 	input  [10:0] X_VECTOR,
 	input  [10:0] Y_VECTOR,
 	input  [7:0]  Z_VECTOR,
@@ -17,7 +21,7 @@ module vfb_top (
 	input         IS_DOT,
 	input         BEAM_ON,
 
-	// DDRAM Framebuffer Interface
+	// Framebuffer DDRAM
 	output        DDRAM_CLK,
 	input         DDRAM_BUSY,
 	output  [7:0] DDRAM_BURSTCNT,
@@ -29,7 +33,7 @@ module vfb_top (
 	output  [7:0] DDRAM_BE,
 	output        DDRAM_WE,
 
-	// SDRAM used by the compressed halo-alignment delay
+	// Compressed primary delay
 	input  [15:0] SDRAM_DQ_IN,
 	output [15:0] SDRAM_DQ_OUT,
 	output        SDRAM_DQ_OE,
@@ -46,7 +50,7 @@ module vfb_top (
 	input [11:0]  RENDER_WIDTH,
 	input [11:0]  RENDER_HEIGHT,
 
-	// VGA Readout Interface
+	// Video output
 	output logic [7:0]  VGA_R,
 	output logic [7:0]  VGA_G,
 	output logic [7:0]  VGA_B,
@@ -58,12 +62,13 @@ module vfb_top (
 	input  [10:0] h_cnt,
 	input  [10:0] v_cnt,
 	input         ce_pix,
+	input         ce_pix_overlay,
 	input         hsync,
 	input         vsync,
 	input         hblank,
 	input         vblank,
 
-	// Custom and frame sync signals
+	// Frame, buffer, and CRT controls
 	input  [7:0]  FLASH_PARAM,
 	input         OSD_120HZ,
 	input         FRAME_DONE,
@@ -74,6 +79,8 @@ module vfb_top (
 	input  [2:0]  osd_bloom_width,
 	input  [2:0]  osd_bloom_curve,
 	input  [2:0]  osd_halo_filter,
+	input  [2:0]  osd_halo_curve,
+	input  [1:0]  osd_halo_knee,
 	input  [1:0]  osd_phosphor_mode,    // 0=Off, 1=LUT A, 2=LUT B, 3=LUT C
 	input  [1:0]  osd_inter_frame_phosphor_mode,
 	input  [1:0]  osd_halo_spread,
@@ -81,18 +88,30 @@ module vfb_top (
 	input  [2:0]  osd_presentation_color,
 	input         osd_slot_mask,
 	input         osd_slot_mask_rows,
-	input         osd_full_bypass,
+	input         full_bypass_active,
+	input         processed_path_prepare,
+	input         artwork_enable,
+	input   [2:0] artwork_blend,
 
-	output wire   arbiter_reset_busy
+	input         ioctl_download,
+	input         ioctl_wr,
+	input  [15:0] ioctl_index,
+	input  [26:0] ioctl_addr,
+	input   [7:0] ioctl_data,
+	output        artwork_available,
+	output        ioctl_wait,
+	output wire   raw_path_vblank,
+	output wire   processed_path_vblank
 );
+	import vfb_layout_pkg::*;
 
-	localparam TILE_SIZE = 8;   // 8x8 tiles
+	localparam TILE_SIZE = VFB_TILE_SIZE;
 	localparam CACHE_COUNT = 4; // Four cache slots in this integration.
-	localparam BUFFER_COUNT = 5;
+	localparam BUFFER_COUNT = VFB_BUFFER_COUNT;
 	localparam BUF_IDX_W = 3;
 	localparam TILEMAP_ADDR_W = 15;
 
-	// Rasterizer to Cache Manager Handshake
+	// Rasterizer and tile cache
 	logic        pixel_valid;
 	logic        pixel_ready;
 	logic [15:0] pixel_tile_id;
@@ -101,7 +120,7 @@ module vfb_top (
 	wire rasterizer_fifo_full_led;
 
 
-	// Readout to DDRAM arbiter handshake
+	// Readout and DDRAM arbiter
 	wire        readout_ready;
 	wire        readout_grant;
 	wire [15:0] readout_tile_id;
@@ -109,45 +128,47 @@ module vfb_top (
 	wire        readout_data_valid;
 	wire        flush_done_arbiter;
 
-	// EOF metadata path
+	// End-of-frame timing
 	wire        eof_token;
 	wire        eof_token_popped;
 	wire [15:0] eof_frame_tick_clks_popped;
 	wire [15:0] eof_elapsed_frame_tick_clks_popped;
 	wire [15:0] eof_completed_frame_tick_clks;
 
-	// VBL promotion request to the buffer controller
+	// VBLANK display request
 	wire        vbl_swap_req;
+	wire        readout_frame_start;
 
-	wire        fifo_empty;
 	wire [BUF_IDX_W-1:0] buf_display;
 	wire [BUF_IDX_W-1:0] buf_draw;
-	wire        arbiter_idle;
+	wire        arbiter_reset_busy;
 
-	// Framebuffer / DDRAM client reset
+	// Reset framebuffer and DDRAM clients.
 	assign DDRAM_CLK = clk_sys;
 
-	// Accept a new inter-frame mode only after two matching synchronized samples.
-	logic [1:0] inter_mode_meta = 2'd0;
-	logic [1:0] inter_mode_sync = 2'd0;
-	logic [1:0] inter_mode_sync_d = 2'd0;
+	logic [2:0] osd_bloom_width_vid = 3'd0;
+	logic [1:0] osd_halo_spread_vid = 2'd0;
+	logic [1:0] osd_halo_knee_vid = 2'd0;
+	logic       osd_color_space_vid = 1'b0;
+	logic [2:0] osd_presentation_color_vid = 3'd0;
+	logic       osd_slot_mask_vid = 1'b0;
+	logic       osd_slot_mask_rows_vid = 1'b0;
+	logic       full_bypass_active_q = 1'b1;
+	logic       processed_path_prepare_q = 1'b0;
+	logic [9:0] bloom_curve_gain = 10'd64;
+	logic [2:0] halo_curve_mode = 3'd0;
+	logic [7:0] halo_filter = 8'd0;
+	logic [1:0] osd_phosphor_mode_vid = 2'd0;
 	logic [1:0] inter_frame_mode_vid = 2'd0;
-	logic [1:0] osd_phosphor_mode_vid;
+	logic [2:0] dot_mode_vid = 3'd0;
+	logic [1:0] buffer_mode_vid = 2'd0;
+	logic       osd_120hz_vid = 1'b0;
+	logic       artwork_enable_vid = 1'b0;
+	logic [2:0] artwork_blend_vid = 3'd0;
 
 	always_ff @(posedge clk_sys) begin
-		if (reset) begin
-			inter_mode_meta <= osd_inter_frame_phosphor_mode;
-			inter_mode_sync <= osd_inter_frame_phosphor_mode;
-			inter_mode_sync_d <= osd_inter_frame_phosphor_mode;
-			inter_frame_mode_vid <= osd_inter_frame_phosphor_mode;
-		end else begin
-			inter_mode_meta <= osd_inter_frame_phosphor_mode;
-			inter_mode_sync <= inter_mode_meta;
-			inter_mode_sync_d <= inter_mode_sync;
-			if ((inter_mode_sync == inter_mode_sync_d) &&
-			    (inter_mode_sync != inter_frame_mode_vid))
-				inter_frame_mode_vid <= inter_mode_sync;
-		end
+		full_bypass_active_q <= full_bypass_active;
+		processed_path_prepare_q <= processed_path_prepare;
 	end
 
 	wire fb_reset_request = reset;
@@ -157,8 +178,7 @@ module vfb_top (
 	always_ff @(posedge clk_sys)
 		filter_reset_q <= fb_reset_request | video_timing_reset;
 
-	// Frame timing is measured directly in source clocks. Each EOF token carries
-	// the draw-phase duration used by its frame, so no game-rate table is needed.
+	// Measure frame timing in source clocks and store each frame's draw duration.
 	wire [3:0]  draw_idx;
 	wire [15:0] active_frame_tick_clks;
 	wire [15:0] completed_frame_tick_clks;
@@ -183,7 +203,7 @@ module vfb_top (
 	) phosphor_timing_inst (
 		.clk_source(clk_12),
 		.clk_sys(clk_sys),
-		.reset_source(reset),
+		.reset_source(source_reset),
 		.reset_sys(fb_client_reset),
 		.frame_done(FRAME_DONE),
 
@@ -193,8 +213,8 @@ module vfb_top (
 		.buf_draw(buf_draw),
 		.buf_display(buf_display),
 		.vbl_swap_req(vbl_swap_req),
-		.presentation_120hz(OSD_120HZ),
-		.BUFFER_MODE(BUFFER_MODE),
+		.presentation_120hz(osd_120hz_vid),
+		.BUFFER_MODE(buffer_mode_vid),
 		.compose_req(compose_req),
 		.compose_buf(compose_target_buf),
 		.raw_frame_dropped(raw_frame_dropped),
@@ -218,7 +238,7 @@ module vfb_top (
 		.clk_12(clk_12),
 		.reset(fb_client_reset),
 
-		// Vector Input Interface
+		// Vector input
 		.X_VECTOR(X_VECTOR),
 		.Y_VECTOR(Y_VECTOR),
 		.Z_VECTOR(Z_VECTOR),
@@ -226,11 +246,11 @@ module vfb_top (
 		.IS_DOT(IS_DOT),
 		.BEAM_ON(BEAM_ON),
 		.FRAME_DONE(FRAME_DONE),
-		.DOT_MODE(DOT_MODE),
+		.DOT_MODE(dot_mode_vid),
 		.FB_WIDTH(RENDER_WIDTH),
 		.FB_HEIGHT(RENDER_HEIGHT),
 
-		// Outputs to Cache Manager
+		// Tile cache output
 		.pixel_valid(pixel_valid),
 		.pixel_ready(pixel_ready),
 		.pixel_tile_id(pixel_tile_id),
@@ -244,10 +264,10 @@ module vfb_top (
 		.eof_token(eof_token),
 		.eof_completed_frame_tick_clks(eof_completed_frame_tick_clks),
 		.fifo_full_led(rasterizer_fifo_full_led),
-		.fifo_empty(fifo_empty)
+		.fifo_empty()
 	);
 
-	// Inter-module signals
+	// Internal connections
 	wire        fill_ready, fill_grant;
 	wire [28:0] fill_addr;
 	wire [7:0]  fill_burstcnt;
@@ -270,20 +290,12 @@ module vfb_top (
 	wire has_draw_buf;
 	wire display_valid;
 	wire display_is_composed;
-	wire source_overrun;
 	wire [TILEMAP_ADDR_W-1:0] compose_tilemap_addr;
-	wire compose_tilemap_we;
-	wire [BUF_IDX_W-1:0] compose_tilemap_buf;
-	wire compose_tilemap_din;
+	wire [BUFFER_COUNT-1:0] compose_tilemap_write_hot;
+	wire compose_tilemap_write_din;
 	wire [BUFFER_COUNT-1:0] compose_tilemap_dout;
 
-	wire [28:0] buf_base [0:BUFFER_COUNT-1];
-	assign buf_base[0] = 29'h06000000;
-	assign buf_base[1] = 29'h06110000;
-	assign buf_base[2] = 29'h06220000;
-	assign buf_base[3] = 29'h06330000;
-	assign buf_base[4] = 29'h06440000;
-	wire [28:0] display_buf_base = buf_base[buf_display];
+	wire [28:0] display_buf_base = vfb_buffer_base(buf_display);
 
 	vfb_buffer_controller #(
 		.BUFFER_COUNT(BUFFER_COUNT),
@@ -292,7 +304,7 @@ module vfb_top (
 		.clk_sys(clk_sys),
 		.reset(fb_client_reset),
 
-		.BUFFER_MODE(BUFFER_MODE),
+		.BUFFER_MODE(buffer_mode_vid),
 		.inter_frame_mode(inter_frame_mode_vid),
 
 		.eof_token_popped(eof_token_popped),
@@ -319,10 +331,10 @@ module vfb_top (
 		.has_draw_buf(has_draw_buf),
 		.raw_frame_dropped(raw_frame_dropped),
 		.raw_frame_dropped_buf(raw_frame_dropped_buf),
-		.source_overrun(source_overrun)
+		.readout_frame_start(readout_frame_start)
 	);
 
-	assign FIFO_FULL_LED = rasterizer_fifo_full_led | source_overrun;
+	assign FIFO_FULL_LED = rasterizer_fifo_full_led;
 
 	vfb_tile_cache_manager #(
 		.TILE_SIZE(TILE_SIZE),
@@ -333,10 +345,9 @@ module vfb_top (
 		.clk_sys(clk_sys),
 		.reset(fb_client_reset),
 
-		.FB_WIDTH(RENDER_WIDTH),
 		.FB_HEIGHT(RENDER_HEIGHT),
 
-		// Rasterizer Interface
+		// Rasterizer
 		.pixel_valid(pixel_valid),
 		.pixel_ready(pixel_ready),
 		.pixel_tile_id(pixel_tile_id),
@@ -345,9 +356,8 @@ module vfb_top (
 
 		.eof_token(eof_token),
 		.eof_completed_frame_tick_clks(eof_completed_frame_tick_clks),
-		.fifo_empty(fifo_empty),
 
-		// Buffer Controller Interface
+		// Buffer controller
 		.eof_token_popped(eof_token_popped),
 		.eof_frame_tick_clks_popped(eof_frame_tick_clks_popped),
 		.eof_elapsed_frame_tick_clks_popped(eof_elapsed_frame_tick_clks_popped),
@@ -361,7 +371,7 @@ module vfb_top (
 		.display_valid(display_valid),
 		.has_draw_buf(has_draw_buf),
 
-		// Arbiter Interface
+		// DDRAM arbiter
 		.fill_ready(fill_ready),
 		.fill_grant(fill_grant),
 		.fill_addr(fill_addr),
@@ -381,11 +391,9 @@ module vfb_top (
 		.display_tile_addr(display_tile_addr),
 		.display_tile_dirty(display_tile_dirty),
 		.compose_tilemap_addr(compose_tilemap_addr),
-		.compose_tilemap_we(compose_tilemap_we),
-		.compose_tilemap_buf(compose_tilemap_buf),
-		.compose_tilemap_din(compose_tilemap_din),
-		.compose_tilemap_dout(compose_tilemap_dout),
-		.arbiter_idle(arbiter_idle)
+		.compose_tilemap_write_hot(compose_tilemap_write_hot),
+		.compose_tilemap_write_din(compose_tilemap_write_din),
+		.compose_tilemap_dout(compose_tilemap_dout)
 	);
 
 	wire [28:0] readout_addr = display_buf_base + ({13'd0, readout_tile_id} << 4);
@@ -405,6 +413,19 @@ module vfb_top (
 	wire [63:0] compose_write_data;
 	wire [7:0]  compose_write_be;
 	wire        compose_write_advance;
+	wire        upload_write_ready;
+	wire        upload_write_done;
+	wire [28:0] upload_write_addr;
+	wire  [7:0] upload_write_burstcnt;
+	wire [63:0] upload_write_data;
+	wire  [7:0] upload_write_be;
+	wire        upload_write_advance;
+	wire        artwork_read_ready;
+	wire        artwork_read_grant;
+	wire [28:0] artwork_read_addr;
+	wire  [7:0] artwork_read_burstcnt;
+	wire [63:0] artwork_read_data;
+	wire        artwork_read_data_valid;
 
 	vfb_phosphor_compositor #(
 		.BUFFER_COUNT(BUFFER_COUNT),
@@ -428,9 +449,8 @@ module vfb_top (
 		.raw_frame_age(compose_frame_age),
 		.raw_metadata_ready(compose_metadata_ready),
 		.tilemap_addr(compose_tilemap_addr),
-		.tilemap_we(compose_tilemap_we),
-		.tilemap_buf(compose_tilemap_buf),
-		.tilemap_din(compose_tilemap_din),
+		.tilemap_write_hot(compose_tilemap_write_hot),
+		.tilemap_write_din(compose_tilemap_write_din),
 		.tilemap_dout(compose_tilemap_dout),
 		.read_ready(compose_read_ready),
 		.read_grant(compose_read_grant),
@@ -450,9 +470,9 @@ module vfb_top (
 
 	vfb_ddr_arbiter ddr_arbiter_inst (
 		.clk_sys(clk_sys),
-		.rst_sys(fb_reset_request),
+		.rst_sys(ddr_reset),
 
-		// DDRAM Avalon-MM Interface
+		// DDRAM Avalon-MM
 		.DDRAM_BUSY(DDRAM_BUSY),
 		.DDRAM_BURSTCNT(DDRAM_BURSTCNT),
 		.DDRAM_ADDR(DDRAM_ADDR),
@@ -502,8 +522,20 @@ module vfb_top (
 		.compose_write_data(compose_write_data),
 		.compose_write_be(compose_write_be),
 		.compose_write_advance(compose_write_advance),
+		.upload_write_ready(upload_write_ready),
+		.upload_write_done(upload_write_done),
+		.upload_write_addr(upload_write_addr),
+		.upload_write_burstcnt(upload_write_burstcnt),
+		.upload_write_data(upload_write_data),
+		.upload_write_be(upload_write_be),
+		.upload_write_advance(upload_write_advance),
+		.artwork_read_ready(artwork_read_ready),
+		.artwork_read_grant(artwork_read_grant),
+		.artwork_read_addr(artwork_read_addr),
+		.artwork_read_burstcnt(artwork_read_burstcnt),
+		.artwork_read_data(artwork_read_data),
+		.artwork_read_data_valid(artwork_read_data_valid),
 
-		.arbiter_idle(arbiter_idle),
 		.reset_busy(arbiter_reset_busy)
 	);
 
@@ -515,9 +547,16 @@ module vfb_top (
 	wire       raw_vga_hblank;
 	wire       raw_vga_vblank;
 
-	// Synchronize OSD controls before decoding filter values.
-	wire [19:0] osd_control_in = {
-		osd_full_bypass,
+	// Synchronize menu options.
+	wire [35:0] osd_control_in = {
+		osd_halo_knee,
+		osd_halo_curve,
+		artwork_blend,
+		artwork_enable,
+		OSD_120HZ,
+		BUFFER_MODE,
+		DOT_MODE,
+		osd_inter_frame_phosphor_mode,
 		osd_slot_mask_rows,
 		osd_slot_mask,
 		osd_presentation_color,
@@ -529,19 +568,12 @@ module vfb_top (
 		osd_bloom_width
 	};
 
-	logic [19:0] osd_control_meta;
-	logic [19:0] osd_control_sync;
-	logic [19:0] osd_control_sync_d;
-	logic [19:0] osd_control_stable;
-	logic [2:0]  osd_bloom_width_vid;
-	logic [1:0]  osd_halo_spread_vid;
-	logic        osd_color_space_vid;
-	logic [2:0]  osd_presentation_color_vid;
-	logic        osd_slot_mask_vid;
-	logic        osd_slot_mask_rows_vid;
-	logic        osd_full_bypass_vid;
-	logic [9:0]  bloom_curve_gain;
-	logic [7:0]  halo_filter;
+	(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+	logic [35:0] osd_control_meta = '0;
+	(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+	logic [35:0] osd_control_sync = '0;
+	logic [35:0] osd_control_sync_d = '0;
+	logic [35:0] osd_control_stable = '0;
 
 	function automatic [9:0] decode_bloom_curve_gain(
 		input logic [2:0] sel
@@ -576,42 +608,30 @@ module vfb_top (
 	endfunction
 
 	always_ff @(posedge clk_sys) begin
-		if (fb_client_reset | video_timing_reset) begin
-			osd_control_meta <= osd_control_in;
-			osd_control_sync <= osd_control_in;
-			osd_control_sync_d <= osd_control_in;
-			osd_control_stable <= osd_control_in;
-			osd_bloom_width_vid <= osd_bloom_width;
-			osd_phosphor_mode_vid <= osd_phosphor_mode;
-			osd_halo_spread_vid <= osd_halo_spread;
-			osd_color_space_vid <= osd_color_space;
-			osd_presentation_color_vid <= osd_presentation_color;
-			osd_slot_mask_vid <= osd_slot_mask;
-			osd_slot_mask_rows_vid <= osd_slot_mask_rows;
-			osd_full_bypass_vid <= osd_full_bypass;
-			bloom_curve_gain <=
-				decode_bloom_curve_gain(osd_bloom_curve);
-			halo_filter <= decode_halo_filter(osd_halo_filter);
-		end else begin
-			osd_control_meta <= osd_control_in;
-			osd_control_sync <= osd_control_meta;
-			osd_control_sync_d <= osd_control_sync;
-			if (osd_control_sync == osd_control_sync_d)
-				osd_control_stable <= osd_control_sync;
+		osd_control_meta <= osd_control_in;
+		osd_control_sync <= osd_control_meta;
+		osd_control_sync_d <= osd_control_sync;
+		if (osd_control_sync == osd_control_sync_d)
+			osd_control_stable <= osd_control_sync;
 
-			osd_bloom_width_vid <= osd_control_stable[2:0];
-			bloom_curve_gain <=
-				decode_bloom_curve_gain(osd_control_stable[5:3]);
-			halo_filter <= decode_halo_filter(
-				osd_control_stable[8:6]);
-			osd_phosphor_mode_vid <= osd_control_stable[10:9];
-			osd_halo_spread_vid <= osd_control_stable[12:11];
-			osd_color_space_vid <= osd_control_stable[13];
-			osd_presentation_color_vid <= osd_control_stable[16:14];
-			osd_slot_mask_vid <= osd_control_stable[17];
-			osd_slot_mask_rows_vid <= osd_control_stable[18];
-			osd_full_bypass_vid <= osd_control_stable[19];
-		end
+		osd_bloom_width_vid <= osd_control_stable[2:0];
+		bloom_curve_gain <=
+			decode_bloom_curve_gain(osd_control_stable[5:3]);
+		halo_curve_mode <= osd_control_stable[33:31];
+		osd_halo_knee_vid <= osd_control_stable[35:34];
+		halo_filter <= decode_halo_filter(osd_control_stable[8:6]);
+		osd_phosphor_mode_vid <= osd_control_stable[10:9];
+		osd_halo_spread_vid <= osd_control_stable[12:11];
+		osd_color_space_vid <= osd_control_stable[13];
+		osd_presentation_color_vid <= osd_control_stable[16:14];
+		osd_slot_mask_vid <= osd_control_stable[17];
+		osd_slot_mask_rows_vid <= osd_control_stable[18];
+		inter_frame_mode_vid <= osd_control_stable[20:19];
+		dot_mode_vid <= osd_control_stable[23:21];
+		buffer_mode_vid <= osd_control_stable[25:24];
+		osd_120hz_vid <= osd_control_stable[26];
+		artwork_enable_vid <= osd_control_stable[27];
+		artwork_blend_vid <= osd_control_stable[30:28];
 	end
 
 	vfb_readout #(
@@ -629,8 +649,9 @@ module vfb_top (
 		.readout_data_valid(readout_data_valid),
 
 		.vbl_swap_req(vbl_swap_req),
+		.frame_start_req(readout_frame_start),
 
-		// Raw readout packet
+		// Readout output
 		.VGA_R(raw_vga_r),
 		.VGA_G(raw_vga_g),
 		.VGA_B(raw_vga_b),
@@ -659,9 +680,6 @@ module vfb_top (
 		.display_is_composed(display_is_composed)
 	);
 
-	wire sdram_delay_overflow;
-	wire sdram_delay_underflow;
-	wire sdram_delay_init_done;
 	wire [7:0] filtered_vga_r;
 	wire [7:0] filtered_vga_g;
 	wire [7:0] filtered_vga_b;
@@ -669,6 +687,15 @@ module vfb_top (
 	wire       filtered_vga_vs;
 	wire       filtered_vga_hblank;
 	wire       filtered_vga_vblank;
+	wire [7:0] artwork_vga_r;
+	wire [7:0] artwork_vga_g;
+	wire [7:0] artwork_vga_b;
+	wire       artwork_vga_hs;
+	wire       artwork_vga_vs;
+	wire       artwork_vga_hblank;
+	wire       artwork_vga_vblank;
+	assign raw_path_vblank = raw_vga_vblank;
+	assign processed_path_vblank = artwork_vga_vblank;
 
 	vfb_halo_pipeline filter_inst (
 		.clk_sys(clk_sys),
@@ -677,8 +704,10 @@ module vfb_top (
 
 		.osd_bloom_width(osd_bloom_width_vid),
 		.bloom_curve_gain(bloom_curve_gain),
+		.halo_curve_mode(halo_curve_mode),
 		.halo_filter(halo_filter),
 		.halo_spread_mode(osd_halo_spread_vid),
+		.halo_knee_mode(osd_halo_knee_vid),
 		.active_height(RENDER_HEIGHT),
 		.color_space_amp709(osd_color_space_vid),
 		.presentation_color(osd_presentation_color_vid),
@@ -711,14 +740,59 @@ module vfb_top (
 		.sdram_we(SDRAM_nWE),
 		.sdram_dqm(SDRAM_DQM),
 		.sdram_addr(SDRAM_A),
-		.sdram_ba(SDRAM_BA),
-		.sdram_overflow(sdram_delay_overflow),
-		.sdram_underflow(sdram_delay_underflow),
-		.sdram_init_done(sdram_delay_init_done)
+		.sdram_ba(SDRAM_BA)
 	);
 
-	// Full bypass passes the readout packet directly to the MiSTer
-	// framework.
+	vfb_overlay artwork_overlay (
+		.clk_sys(clk_sys),
+		.clk_io(clk_io),
+		.reset(reset),
+		.upload_reset(upload_reset),
+		.arbiter_ready(!arbiter_reset_busy),
+		.video_timing_reset(video_timing_reset),
+		.processed_path_active(processed_path_prepare_q),
+		.artwork_enable(artwork_enable_vid),
+		.artwork_blend(artwork_blend_vid),
+		.render_width(RENDER_WIDTH),
+		.render_height(RENDER_HEIGHT),
+		.artwork_available(artwork_available),
+		.ioctl_download(ioctl_download),
+		.ioctl_wr(ioctl_wr),
+		.ioctl_index(ioctl_index),
+		.ioctl_addr(ioctl_addr),
+		.ioctl_data(ioctl_data),
+		.ioctl_wait(ioctl_wait),
+		.ce_pix(ce_pix_overlay),
+		.video_r_in(filtered_vga_r),
+		.video_g_in(filtered_vga_g),
+		.video_b_in(filtered_vga_b),
+		.video_hs_in(filtered_vga_hs),
+		.video_vs_in(filtered_vga_vs),
+		.video_hblank_in(filtered_vga_hblank),
+		.video_vblank_in(filtered_vga_vblank),
+		.video_r_out(artwork_vga_r),
+		.video_g_out(artwork_vga_g),
+		.video_b_out(artwork_vga_b),
+		.video_hs_out(artwork_vga_hs),
+		.video_vs_out(artwork_vga_vs),
+		.video_hblank_out(artwork_vga_hblank),
+		.video_vblank_out(artwork_vga_vblank),
+		.upload_write_ready(upload_write_ready),
+		.upload_write_done(upload_write_done),
+		.upload_write_addr(upload_write_addr),
+		.upload_write_burstcnt(upload_write_burstcnt),
+		.upload_write_data(upload_write_data),
+		.upload_write_be(upload_write_be),
+		.upload_write_advance(upload_write_advance),
+		.artwork_read_ready(artwork_read_ready),
+		.artwork_read_grant(artwork_read_grant),
+		.artwork_read_addr(artwork_read_addr),
+		.artwork_read_burstcnt(artwork_read_burstcnt),
+		.artwork_read_data(artwork_read_data),
+		.artwork_read_data_valid(artwork_read_data_valid)
+	);
+
+	// Full bypass selects the unfiltered readout.
 	always_ff @(posedge clk_sys) begin
 		if (fb_client_reset | video_timing_reset) begin
 			VGA_R <= 8'd0;
@@ -729,7 +803,7 @@ module vfb_top (
 			VGA_HBLANK <= 1'b1;
 			VGA_VBLANK <= 1'b1;
 		end else if (ce_pix) begin
-			if (osd_full_bypass_vid) begin
+			if (full_bypass_active_q) begin
 				VGA_R <= raw_vga_r;
 				VGA_G <= raw_vga_g;
 				VGA_B <= raw_vga_b;
@@ -738,13 +812,13 @@ module vfb_top (
 				VGA_HBLANK <= raw_vga_hblank;
 				VGA_VBLANK <= raw_vga_vblank;
 			end else begin
-				VGA_R <= filtered_vga_r;
-				VGA_G <= filtered_vga_g;
-				VGA_B <= filtered_vga_b;
-				VGA_HS <= filtered_vga_hs;
-				VGA_VS <= filtered_vga_vs;
-				VGA_HBLANK <= filtered_vga_hblank;
-				VGA_VBLANK <= filtered_vga_vblank;
+				VGA_R <= artwork_vga_r;
+				VGA_G <= artwork_vga_g;
+				VGA_B <= artwork_vga_b;
+				VGA_HS <= artwork_vga_hs;
+				VGA_VS <= artwork_vga_vs;
+				VGA_HBLANK <= artwork_vga_hblank;
+				VGA_VBLANK <= artwork_vga_vblank;
 			end
 		end
 	end

@@ -4,8 +4,8 @@
 // Sparse inter-frame phosphor compositor.
 // written 2026 by Videodr0me
 //
-// A completed raw frame is composed in place with the newest accumulator.
-// The target remains private until every union tile is complete.
+// A completed raw frame is blended in place with the newest accumulator.
+// The target cannot be shown until every required tile is finished.
 // ============================================================================
 
 module vfb_phosphor_compositor #(
@@ -34,9 +34,8 @@ module vfb_phosphor_compositor #(
 	input  logic        raw_metadata_ready,
 
 	output logic [TILEMAP_ADDR_W-1:0] tilemap_addr,
-	output logic                      tilemap_we,
-	output logic [BUF_IDX_W-1:0]      tilemap_buf,
-	output logic                      tilemap_din,
+	output logic [BUFFER_COUNT-1:0]   tilemap_write_hot,
+	output logic                      tilemap_write_din,
 	input  logic [BUFFER_COUNT-1:0]   tilemap_dout,
 
 	output logic        read_ready,
@@ -56,24 +55,18 @@ module vfb_phosphor_compositor #(
 	input  logic        write_advance
 );
 
-	localparam integer TILEMAP_STRIDE = 192;
+	import vfb_layout_pkg::*;
 
-	function automatic [28:0] buffer_base(
-		input logic [BUF_IDX_W-1:0] index
-	);
-		begin
-			case (index)
-				3'd0: buffer_base = 29'h06000000;
-				3'd1: buffer_base = 29'h06110000;
-				3'd2: buffer_base = 29'h06220000;
-				3'd3: buffer_base = 29'h06330000;
-				3'd4: buffer_base = 29'h06440000;
-				default: buffer_base = 29'h06000000;
-			endcase
-		end
-	endfunction
+	logic [1:0] intra_frame_mode_control_q = 2'd0;
+	logic [1:0] inter_frame_mode_control_q = 2'd0;
+	logic [BUFFER_COUNT-1:0] target_buf_hot_q = '0;
 
-	// Short, Medium, and Long each pack a fresh-hit factor above the tail factor.
+	always_ff @(posedge clk_sys) begin
+		intra_frame_mode_control_q <= intra_frame_mode;
+		inter_frame_mode_control_q <= inter_frame_mode;
+	end
+
+	// Each entry returns {fresh-frame factor, accumulated-tail factor}.
 	function automatic [15:0] inter_decay_factors(
 		input logic [1:0] mode,
 		input logic [3:0] age
@@ -241,6 +234,7 @@ module vfb_phosphor_compositor #(
 	logic [63:0] composed_tile [0:15];
 	logic [3:0] read_beat;
 	logic [3:0] write_beat;
+	logic [63:0] write_data_q;
 	logic [5:0] pixel_index;
 	logic [5:0] lookahead_pixel_index;
 
@@ -257,13 +251,8 @@ module vfb_phosphor_compositor #(
 	logic [15:0] next_old_pixel_q;
 	logic [7:0] next_raw_factor_q;
 	logic [7:0] next_old_factor_q;
-	logic [9:0] blend_r_sum_q;
-	logic [9:0] blend_g_sum_q;
-	logic [9:0] blend_b_sum_q;
-	logic [8:0] blend_single_energy_q;
+	logic [8:0] blend_energy_q;
 	logic [2:0] blend_color_q;
-	logic       blend_both_q;
-	logic       blend_same_color_q;
 	logic       blend_fresh_q;
 	logic [15:0] pending_pixel_q;
 	logic [3:0]  pending_word_q;
@@ -272,9 +261,9 @@ module vfb_phosphor_compositor #(
 	logic        pending_write_q;
 
 	wire [15:0] current_tile_id = {tile_y, tile_x};
-	wire [28:0] source_tile_addr = buffer_base(source_buf_q)
+	wire [28:0] source_tile_addr = vfb_buffer_base(source_buf_q)
 		+ ({13'd0, current_tile_id} << 4);
-	wire [28:0] target_tile_addr = buffer_base(target_buf_q)
+	wire [28:0] target_tile_addr = vfb_buffer_base(target_buf_q)
 		+ ({13'd0, current_tile_id} << 4);
 
 	wire [63:0] raw_word = raw_tile[pixel_index[5:2]];
@@ -304,77 +293,20 @@ module vfb_phosphor_compositor #(
 	wire [8:0] old_energy = old_product_q[16:8];
 	wire       raw_present = (raw_energy != 9'd0);
 	wire       old_present = (old_energy != 9'd0);
-	wire [8:0] blend_hi = (raw_energy >= old_energy) ? raw_energy : old_energy;
-	wire [8:0] blend_lo = (raw_energy >= old_energy) ? old_energy : raw_energy;
-	wire [9:0] blend_overlap = {1'b0, blend_hi} + {5'b00000, blend_lo[8:4]};
-
-	function automatic logic [9:0] soft_cross_channel(
-		input logic       raw_en,
-		input logic       old_en,
-		input logic [8:0] raw_z,
-		input logic [8:0] old_z,
-		input logic [9:0] overlap_z
-	);
-		begin
-			if (raw_en && old_en)
-				soft_cross_channel = overlap_z;
-			else if (raw_en)
-				soft_cross_channel = {1'b0, raw_z};
-			else if (old_en)
-				soft_cross_channel = {1'b0, old_z};
-			else
-				soft_cross_channel = 10'd0;
-		end
-	endfunction
-
-	wire [9:0] blend_r_sum = soft_cross_channel(
-		raw_rgb_q[2], old_rgb_q[2], raw_energy, old_energy, blend_overlap);
-	wire [9:0] blend_g_sum = soft_cross_channel(
-		raw_rgb_q[1], old_rgb_q[1], raw_energy, old_energy, blend_overlap);
-	wire [9:0] blend_b_sum = soft_cross_channel(
-		raw_rgb_q[0], old_rgb_q[0], raw_energy, old_energy, blend_overlap);
-	wire [11:0] blend_total_energy =
-		blend_r_sum_q + blend_g_sum_q + blend_b_sum_q;
-
-	logic [11:0] normalized_blend_energy;
-	always_comb begin
-		if (!blend_both_q) begin
-			normalized_blend_energy = {3'd0, blend_single_energy_q};
-		end else if (blend_same_color_q) begin
-			if (blend_color_q[2])
-				normalized_blend_energy = {2'd0, blend_r_sum_q};
-			else if (blend_color_q[1])
-				normalized_blend_energy = {2'd0, blend_g_sum_q};
-			else
-				normalized_blend_energy = {2'd0, blend_b_sum_q};
-		end else begin
-			case (blend_color_q)
-				3'b001, 3'b010, 3'b100:
-					normalized_blend_energy = blend_total_energy;
-				3'b011, 3'b101, 3'b110:
-					normalized_blend_energy = blend_total_energy >> 1;
-				3'b111:
-					normalized_blend_energy =
-						(blend_total_energy + (blend_total_energy >> 2)) >> 2;
-				default:
-					normalized_blend_energy = 12'd0;
-			endcase
-		end
-	end
-
-	wire [8:0] stored_energy = (normalized_blend_energy > 12'd511)
-		? 9'd511 : normalized_blend_energy[8:0];
+	wire       raw_wins = raw_present &&
+		(!old_present || (raw_energy >= old_energy));
+	wire [8:0] selected_blend_energy = raw_wins ? raw_energy : old_energy;
+	wire [2:0] selected_blend_color = raw_wins ? raw_rgb_q :
+		old_present ? old_rgb_q : 3'd0;
+	wire [8:0] stored_energy = blend_energy_q;
 	wire [15:0] stored_pixel =
 		{blend_color_q, blend_fresh_q, 3'd0, stored_energy};
 	wire [5:0] pending_bit_offset = {pending_lane_q, 4'b0000};
 
 	assign read_burstcnt = 8'd16;
 	assign write_burstcnt = 8'd16;
-	assign write_data = composed_tile[write_beat];
+	assign write_data = write_data_q;
 	assign write_be = 8'hff;
-	assign tilemap_we = (state == COMP_MAP_COMMIT);
-	assign tilemap_buf = target_buf_q;
-	assign tilemap_din = tile_nonzero;
 
 	always_ff @(posedge clk_sys) begin
 		if (reset) begin
@@ -385,8 +317,11 @@ module vfb_phosphor_compositor #(
 			write_ready <= 1'b0;
 			write_addr <= 29'd0;
 			tilemap_addr <= '0;
+			tilemap_write_hot <= '0;
+			tilemap_write_din <= 1'b0;
 			source_buf_q <= '0;
 			target_buf_q <= '0;
+			target_buf_hot_q <= '0;
 			has_source_q <= 1'b0;
 			source_is_composed_q <= 1'b0;
 			intra_mode_q <= 2'd0;
@@ -404,6 +339,7 @@ module vfb_phosphor_compositor #(
 			tile_nonzero <= 1'b0;
 			read_beat <= 4'd0;
 			write_beat <= 4'd0;
+			write_data_q <= 64'd0;
 			pixel_index <= 6'd0;
 			lookahead_pixel_index <= 6'd0;
 			raw_rgb_q <= 3'd0;
@@ -419,23 +355,23 @@ module vfb_phosphor_compositor #(
 			next_old_pixel_q <= 16'd0;
 			next_raw_factor_q <= 8'd0;
 			next_old_factor_q <= 8'd0;
-			blend_r_sum_q <= 10'd0;
-			blend_g_sum_q <= 10'd0;
-			blend_b_sum_q <= 10'd0;
-			blend_single_energy_q <= 9'd0;
+			blend_energy_q <= 9'd0;
 			blend_color_q <= 3'd0;
-			blend_both_q <= 1'b0;
-			blend_same_color_q <= 1'b0;
 			blend_fresh_q <= 1'b0;
 			pending_write_q <= 1'b0;
 		end else begin
 			compose_done <= 1'b0;
 			pending_write_q <= 1'b0;
+			tilemap_write_hot <= '0;
 
 			if (pending_write_q) begin
 				composed_tile[pending_word_q][pending_bit_offset +: 16]
 					<= pending_pixel_q;
 				tile_nonzero <= tile_nonzero | pending_nonzero_q;
+			end
+			if (write_advance && write_beat != 4'd15) begin
+				write_beat <= write_beat + 4'd1;
+				write_data_q <= composed_tile[write_beat + 4'd1];
 			end
 
 			case (state)
@@ -443,12 +379,14 @@ module vfb_phosphor_compositor #(
 					if (compose_req) begin
 						source_buf_q <= compose_source_buf;
 						target_buf_q <= compose_target_buf;
+						target_buf_hot_q <=
+							{{(BUFFER_COUNT-1){1'b0}}, 1'b1} << compose_target_buf;
 						has_source_q <= compose_has_source;
 						source_is_composed_q <= compose_source_is_composed;
-						intra_mode_q <= intra_frame_mode;
-						inter_mode_q <= inter_frame_mode;
-						tile_columns <= 8'((render_width + 12'd7) >> 3);
-						tile_rows <= 8'((render_height + 12'd7) >> 3);
+						intra_mode_q <= intra_frame_mode_control_q;
+						inter_mode_q <= inter_frame_mode_control_q;
+						tile_columns <= 8'(vfb_tile_columns(render_width));
+						tile_rows <= 8'(vfb_tile_rows(render_height));
 						tile_x <= 8'd0;
 						tile_y <= 8'd0;
 						tilemap_addr <= '0;
@@ -580,16 +518,8 @@ module vfb_phosphor_compositor #(
 				end
 
 				COMP_PIXEL_BLEND: begin
-					blend_r_sum_q <= blend_r_sum;
-					blend_g_sum_q <= blend_g_sum;
-					blend_b_sum_q <= blend_b_sum;
-					blend_single_energy_q <= raw_present
-						? raw_energy : old_energy;
-					blend_color_q <=
-						(raw_present ? raw_rgb_q : 3'd0) |
-						(old_present ? old_rgb_q : 3'd0);
-					blend_both_q <= raw_present && old_present;
-					blend_same_color_q <= (raw_rgb_q == old_rgb_q);
+					blend_energy_q <= selected_blend_energy;
+					blend_color_q <= selected_blend_color;
 					blend_fresh_q <= raw_present;
 					state <= COMP_PIXEL_STORE;
 				end
@@ -621,23 +551,23 @@ module vfb_phosphor_compositor #(
 					write_addr <= target_tile_addr;
 					write_ready <= 1'b1;
 					write_beat <= 4'd0;
+					write_data_q <= composed_tile[0];
 					state <= COMP_WRITE_REQUEST;
 				end
 
 				COMP_WRITE_REQUEST: begin
 					if (write_grant) begin
 						write_ready <= 1'b0;
-						if (write_advance && write_beat != 4'd15)
-							write_beat <= write_beat + 4'd1;
 						state <= COMP_WRITE_WAIT;
 					end
 				end
 
 				COMP_WRITE_WAIT: begin
-					if (write_advance && write_beat != 4'd15)
-						write_beat <= write_beat + 4'd1;
-					if (write_done)
+					if (write_done) begin
+						tilemap_write_hot <= target_buf_hot_q;
+						tilemap_write_din <= tile_nonzero;
 						state <= COMP_MAP_COMMIT;
+					end
 				end
 
 				COMP_MAP_COMMIT: begin
@@ -652,8 +582,7 @@ module vfb_phosphor_compositor #(
 					end else if (tile_x + 8'd1 >= tile_columns) begin
 						tile_x <= 8'd0;
 						tile_y <= tile_y + 8'd1;
-						tilemap_addr <= ({7'd0, tile_y + 8'd1} << 7)
-						              + ({7'd0, tile_y + 8'd1} << 6);
+						tilemap_addr <= vfb_tile_row_addr(tile_y + 8'd1);
 						state <= COMP_MAP_ISSUE;
 					end else begin
 						tile_x <= tile_x + 8'd1;

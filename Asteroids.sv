@@ -17,7 +17,10 @@ module emu
 	logic [31:0] joystick_0;
 	logic [31:0] joystick_1;
 	logic [31:0] joystick;
-	logic [15:0] analog_0;
+	logic [15:0] analog_left;
+	logic [15:0] analog_right;
+	logic  [8:0] spinner_0;
+	logic [24:0] ps2_mouse;
 	logic  [1:0] buttons;
 	logic        direct_video;
 	wire  [21:0] gamma_bus;
@@ -32,7 +35,7 @@ module emu
 	logic [15:0] ioctl_index;
 
 	logic clk_12;
-	logic clk_125;
+	logic clk_render; // 128.520 MHz video, renderer, and SDRAM domain.
 	logic pll_locked;
 
 	logic [2:0] profile;
@@ -40,8 +43,8 @@ module emu
 	logic       profile_touch;
 	logic       profile_typical;
 	logic       profile_overdriven;
-	logic       profile_neon;
-	logic       profile_stranger;
+	logic       profile_ultraviolet;
+	logic       profile_red_alert;
 	logic       profile_custom_1;
 	logic       profile_custom_2;
 	logic       profile_flashing;
@@ -53,9 +56,17 @@ module emu
 	logic [1:0] off_tone_mapping;
 	logic [1:0] custom_1_tone_mapping;
 	logic [1:0] custom_2_tone_mapping;
-	logic [22:0] custom_1_settings;
-	logic [22:0] custom_2_settings;
+	logic [27:0] custom_1_settings;
+	logic [27:0] custom_2_settings;
+	logic        custom_artwork_enable;
+	logic  [2:0] custom_artwork_blend;
 	logic        video_is_720p;
+	logic        artwork_available;
+	logic        artwork_available_meta = 1'b0;
+	logic        artwork_available_ui = 1'b0;
+	logic        artwork_ioctl_wait;
+	logic        video_mode_toggle;
+	logic        video_freeze;
 	logic  [7:0] game_id = 8'd0;
 	logic        game_is_deluxe;
 	logic        game_is_lander;
@@ -69,11 +80,11 @@ module emu
 	assign profile_touch      = (profile == 3'd1);
 	assign profile_typical    = (profile == 3'd2);
 	assign profile_overdriven = (profile == 3'd3);
-	assign profile_neon       = (profile == 3'd4);
-	assign profile_stranger   = (profile == 3'd5);
+	assign profile_ultraviolet = (profile == 3'd5);
+	assign profile_red_alert   = (profile == 3'd4);
 	assign profile_custom_1   = (profile == 3'd6);
 	assign profile_custom_2   = (profile == 3'd7);
-	assign profile_flashing   = profile_neon || profile_stranger;
+	assign profile_flashing   = profile_ultraviolet || profile_red_alert;
 
 	assign custom_bloom_width = profile_custom_2 ? status[99:97] : status[76:74];
 	assign custom_halo = profile_custom_2 ? status[105:103] : status[82:80];
@@ -84,63 +95,65 @@ module emu
 	assign off_tone_mapping = status[38:37] + 2'd3;
 	assign custom_1_tone_mapping = status[73:72] + 2'd3;
 	assign custom_2_tone_mapping = status[96:95] + 2'd3;
+	assign custom_artwork_enable = profile_custom_2 ? status[57] : status[123];
+	assign custom_artwork_blend = profile_custom_2 ? status[60:58] : status[126:124];
 
 	assign custom_1_settings = {
+		status[48:47],
 		status[71:69], custom_1_tone_mapping,
-		status[76:74], status[79:77], status[82:80], status[84:83],
+		status[76:74], status[79:77], status[82:80], status[43:41],
+		status[84:83],
 		status[86:85], status[88:87], status[91:89]
 	};
 
 	assign custom_2_settings = {
+		status[50:49],
 		status[94:92], custom_2_tone_mapping,
-		status[99:97], status[102:100], status[105:103], status[107:106],
+		status[99:97], status[102:100], status[105:103], status[46:44],
+		status[107:106],
 		status[109:108], status[111:110], status[114:112]
 	};
 
 	localparam CONF_STR = {
 		"Asteroids;;",
 		"-;",
-		"P3,Video Options;",
+		"P3,Video Profiles & Effects;",
 		"P3-;",
-		"P3O[15:14],Aspect ratio,Optimized,Stretched,Pixel Perfect;",
-		"D3P3O[25],120Hz (720p only),Off,On;",
-		"D1P3O[122],61.52Hz (Authentic),Off,On;",
-		"h0P3O[115],Direct Video Scan Rate,15 kHz,31 kHz;",
-		"P3O[40:39],Buffer Mode,EOF + VBL,VBL,EOF;",
-		"P3-;",
-		"P3O[68:66],Profile,80s Cruise Control,80s Overdrive,Neon Fever Dream,Purple Haze,Custom 1,Custom 2,Off,A Touch of CRT;",
-		"h7P3O[30:28],Dot Scale,2x,2.5x,3x,1x;",
+		"P3O[68:66],Profile,80s Cruise Control,80s Overdrive,Red Alert,Ultraviolet,Custom 1,Custom 2,Off,A Touch of CRT;",
+		"h7P3O[30:28],Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
 		"h7P3O[38:37],Tone Mapping,Off,Linear 1,Linear 2,Bright;",
 		"h7P3O[119:118],Inter-Frame Decay,Off,Short,Medium,Long;",
 		"h7P3O[56:55],Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
 		"h7P3-;",
-		"h7P3-, For advanced settings;",
-		"h7P3-, select Custom Profiles 1/2;",
+		"h7P3-,For advanced settings and;",
+		"h7P3-,artwork options select;",
+		"h7P3-,Custom Profiles 1/2;",
 		"h8P3-;",
-		"h8P3-,This profile adds a subtle;",
-		"h8P3-,CRT halo and bloom effect,;",
-		"h8P3-,to modern AA vector drawing;",
+		"h8P3-,Modern clarity with a touch;",
+		"h8P3-,of old. Subtle halo & bloom;",
+		"h8P3-,while vectors stay crisp.;",
 		"h8P3-;",
-		"h8P3-,   Use Custom Profiles 1/2;",
-		"h8P3-, to create your own effects;",
+		"h8P3-, For advanced settings;",
+		"h8P3-, select Custom Profiles 1/2;",
 		"h9P3-;",
-		"h9P3-,Step away from the modern..;",
-		"h9P3-,Richer halos and blooming;",
-		"h9P3-,bring back the arcade glow.;",
-		"h9P3-,Long phosphor persistence;",
-		"h9P3-,adds a restrained trail.;",
+		"h9P3-,The familiar vector CRT glow;",
+		"h9P3-,richer halo, stronger bloom;",
+		"h9P3-,and a restrained trail.;",
 		"h9P3-;",
-		"h9P3-,Warning: Overdrive is next;",
+		"h9P3-, For advanced settings;",
+		"h9P3-, select Custom Profiles 1/2;",
 		"hAP3-;",
-		"hAP3-,A remote arcade in the 80s:;",
-		"hAP3-,CRTs overdriven and abused;",
-		"hAP3-,pulsate with vector glow.;",
+		"hAP3-,The arcade look you remember;",
+		"hAP3-,hot vectors and heavy bloom;",
+		"hAP3-,phosphor trails linger.;",
 		"hAP3-;",
-		"hAP3-,Phosphor decay simulation;",
-		"hAP3-,depends highly on your;",
-		"hAP3-,monitor's panel type and;",
-		"hAP3-,settings.;",
+		"hAP3-, For advanced settings;",
+		"hAP3-, select Custom Profiles 1/2;",
 		"hAP3-;",
+		"hBP3-;",
+		"hBP3-,Voltage up. Rules dissolve.;",
+		"hBP3-,Red or ultraviolet visions;",
+		"hBP3-,glow beyond the real world.;",
 		"hBP3-;",
 		"hBP3-,     Epilepsy warning:;",
 		"hBP3-,    excessive flashing;",
@@ -148,33 +161,58 @@ module emu
 		"hBP3-;",
 		"hBP3-,   Use Custom Profiles 1/2;",
 		"hBP3-, to create your own effects;",
-		"hDP3O[71:69],> Dot Scale,2x,2.5x,3x,1x;",
+		"hDDCP3O[123],> Background,Off,On;",
+		"hDDCP3O[126:124],> Background Blend,0,+1,+2,+3,-4,-3,-2,-1;",
+		"hDP3O[71:69],> Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
 		"hDP3O[73:72],> Tone Mapping,Off,Linear 1,Linear 2,Bright;",
 		"hDP3O[76:74],> Bloom Width,Off,Thin,Tight,Soft,Normal,Broad,Wide-,Wide;",
-		"hDD5P3O[79:77],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"hDH5P3O[79:77],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
 		"hDP3O[82:80],> Halo,Off,0.25x,0.33x,0.5x,0.75x,1.0x,1.25x,1.5x;",
-		"hDD6P3O[84:83],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
+		"hDH6P3O[43:41],> Halo Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"hDH6P3O[84:83],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
+		"hDH6P3O[48:47],> Halo Compression,Off,8,16,24;",
 		"hDP3O[86:85],> Inter-Frame Decay,Off,Short,Medium,Long;",
 		"hDP3O[88:87],> Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
-		"hDP3O[91:89],> Vector Color,White,Red,Lunar Green,Deluxe,Cyan,Purple,Yellow;",
-		"hEP3O[94:92],> Dot Scale,2x,2.5x,3x,1x;",
+		"hDP3O[91:89],> Vector Color,White,Deluxe Blue,Lunar Green,Red,Purple,Cyan,Yellow;",
+		"hEDCP3O[57],> Background,Off,On;",
+		"hEDCP3O[60:58],> Background Blend,0,+1,+2,+3,-4,-3,-2,-1;",
+		"hEP3O[94:92],> Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
 		"hEP3O[96:95],> Tone Mapping,Off,Linear 1,Linear 2,Bright;",
 		"hEP3O[99:97],> Bloom Width,Off,Thin,Tight,Soft,Normal,Broad,Wide-,Wide;",
-		"hED5P3O[102:100],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"hEH5P3O[102:100],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
 		"hEP3O[105:103],> Halo,Off,0.25x,0.33x,0.5x,0.75x,1.0x,1.25x,1.5x;",
-		"hED6P3O[107:106],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
+		"hEH6P3O[46:44],> Halo Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"hEH6P3O[107:106],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
+		"hEH6P3O[50:49],> Halo Compression,Off,8,16,24;",
 		"hEP3O[109:108],> Inter-Frame Decay,Off,Short,Medium,Long;",
 		"hEP3O[111:110],> Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
-		"hEP3O[114:112],> Vector Color,White,Red,Lunar Green,Deluxe,Cyan,Purple,Yellow;",
-		"P6,Video Geometry;",
+		"hEP3O[114:112],> Vector Color,White,Deluxe Blue,Lunar Green,Red,Purple,Cyan,Yellow;",
+		"P6,Video Timing & Geometry;",
 		"P6-;",
 		"P6O[7:5],Orientation,Normal,Rotate 90 CW,Rotate 180,Rotate 90 CCW,Mirror Horizontal,Mirror Vertical,Mirror H + 90 CW,Mirror H + 90 CCW;",
 		"P6O[3],Zoom,Normal,Wide;",
+		"P6-;",
+		"P6O[40:39],Buffer Mode,EOF + VBL,VBL,EOF;",
+		"D3P6O[25],120Hz (720p only),Off,On;",
+		"D1P6O[122],61.52Hz (Authentic),Off,On;",
+		"h0P6O[115],Direct Video Scan Rate,15 kHz,31 kHz;",
+		"P6-;",
+		"P6-,Best left at default:;",
+		"P6O[15:14],Aspect Ratio,Optimized,Stretched,Pixel Perfect;",
 		"-;",
 		"P2,Cabinet Audio Hardware;",
 		"P2-;",
 		"P2O[120],Main Board Filtering,On,Off;",
 		"P2O[121],Cabinet Electronics,On,Off;",
+		"-;",
+		"P4,Input Controls;",
+		"P4-;",
+		"P4O[34],Rotation,Buttons,Spinner / Mouse;",
+		"h4P4O[35],Spinner Direction,Normal,Reversed;",
+		"P4-;",
+		"h2P4O[33],Thrust,Button,Up / Button;",
+		"H2P4O[31],Thrust Stick,Left,Right;",
+		"H2P4O[32],Thrust Range,Half,Full;",
 		"-;",
 		"DIP;",
 		"-;",
@@ -205,7 +243,7 @@ module emu
 		"Cadet Mission:\nModerate Gravity\nNo Friction\nControlled Rotation,",
 		"Prime Mission:\nStrong Gravity\nNo Friction\nControlled Rotation,",
 		"Command Mission:\nModerate Gravity\nNo Friction\nRotational Momentum;",
-		"V,v1.0.", `BUILD_DATE
+		"V,v1.1.", `BUILD_DATE
 	};
 
 	hps_io #(.CONF_STR(CONF_STR)) hps_io_inst (
@@ -213,19 +251,25 @@ module emu
 		.HPS_BUS(HPS_BUS),
 		.joystick_0(joystick_0),
 		.joystick_1(joystick_1),
-		.joystick_l_analog_0(analog_0),
+		.joystick_l_analog_0(analog_left),
+		.joystick_r_analog_0(analog_right),
+		.spinner_0(spinner_0),
+		.ps2_mouse(ps2_mouse),
 		.buttons(buttons),
 		.forced_scandoubler(),
 		.direct_video(direct_video),
+		.new_vmode(video_mode_toggle),
 		.gamma_bus(gamma_bus),
 		.status(status),
 		.info_req(info_req),
 		.info(info),
 		.status_menumask({
-			game_is_deluxe, profile_custom_2, profile_custom_1, 1'b0,
+			game_is_deluxe, profile_custom_2, profile_custom_1,
+			!artwork_available_ui,
 			profile_flashing, profile_overdriven, profile_typical, profile_touch,
-			profile_off, custom_halo_off, custom_bloom_off, 1'b0,
-			!video_is_720p, 1'b0,
+			profile_off, custom_halo_off, custom_bloom_off,
+			status[34],
+			!video_is_720p, !game_is_lander,
 			(status[25] && video_is_720p) || game_is_lander,
 			direct_video
 		}),
@@ -238,16 +282,21 @@ module emu
 		.ioctl_addr(ioctl_addr),
 		.ioctl_dout(ioctl_dout),
 		.ioctl_din(ioctl_din),
-		.ioctl_index(ioctl_index)
+		.ioctl_index(ioctl_index),
+		.ioctl_wait(artwork_ioctl_wait)
 	);
+
+	always_ff @(posedge clk_12) begin
+		artwork_available_meta <= artwork_available;
+		artwork_available_ui <= artwork_available_meta;
+	end
 
 	pll pll (
 		.refclk(CLK_50M),
 		.rst(1'b0),
-		.outclk_0(),
-		.outclk_1(clk_12),
-		.outclk_2(),
-		.outclk_3(clk_125),
+		.outclk_0(clk_12),
+		.outclk_1(),
+		.outclk_2(clk_render),
 		.locked(pll_locked)
 	);
 
@@ -334,15 +383,35 @@ module emu
 	logic       dvg_is_dot;
 	logic       dvg_frame_done;
 	logic [7:0] llander_thrust;
+	logic       rotate_right;
+	logic       rotate_left;
 	logic [4:0] llander_lamps;
 	logic [3:0] llander_mission_lamps_q = 4'b0000;
 
 	llander_thrust_input thrust_input (
 		.clk(clk_12),
 		.reset(machine_reset),
-		.analog_y($signed(analog_0[15:8])),
+		.analog_left_y($signed(analog_left[15:8])),
+		.analog_right_y($signed(analog_right[15:8])),
+		.select_right(status[31]),
+		.full_range(status[32]),
 		.digital_thrust(game_is_lander && joystick[4]),
 		.thrust_level(llander_thrust)
+	);
+
+	asteroids_spinner_input spinner_input (
+		.clk(clk_12),
+		.reset(machine_reset),
+		.pause(pause_cpu),
+		.game_is_lander(game_is_lander),
+		.spinner_mode(status[34]),
+		.reverse(status[35]),
+		.spinner(spinner_0),
+		.mouse(ps2_mouse),
+		.button_right(joystick[0]),
+		.button_left(joystick[1]),
+		.rotate_right(rotate_right),
+		.rotate_left(rotate_left)
 	);
 
 	asteroids_core machine (
@@ -364,11 +433,12 @@ module emu
 		                                  dip_switch[1][1]),
 		.start_1(joystick[7]),
 		.start_2(joystick[8]),
-		.thrust(game_is_lander ? 1'b0 : joystick[5]),
+		.thrust(game_is_lander ? 1'b0 :
+		        (joystick[5] || (status[33] && joystick[3]))),
 		.thrust_level(llander_thrust),
 		.abort(game_is_lander && joystick[5]),
-		.rotate_right(joystick[0]),
-		.rotate_left(joystick[1]),
+		.rotate_right(rotate_right),
+		.rotate_left(rotate_left),
 		.fire(joystick[4]),
 		.hyperspace(game_is_lander ? 1'b0 : joystick[6]),
 		.cocktail(1'b0),
@@ -421,7 +491,7 @@ module emu
 	logic video_vblank;
 	logic fifo_full;
 
-	assign SDRAM_CLK = ~clk_125;
+	assign SDRAM_CLK = ~clk_render;
 	assign SDRAM_DQ = sdram_data_oe ? sdram_data_out : 16'hzzzz;
 	assign SDRAM_DQML = sdram_dqm[0];
 	assign SDRAM_DQMH = sdram_dqm[1];
@@ -429,8 +499,10 @@ module emu
 	asteroids_video video (
 		.clk_12(clk_12),
 		.clk_50(CLK_50M),
-		.clk_125(clk_125),
+		.clk_render(clk_render),
 		.reset(machine_reset),
+		.ddr_reset(machine_reset),
+		.upload_reset(!pll_locked),
 		.direct_video(direct_video),
 		.direct_video_31khz(status[115]),
 		.hdmi_height(HDMI_HEIGHT),
@@ -443,6 +515,13 @@ module emu
 		.profile(profile),
 		.game_is_deluxe(game_is_deluxe),
 		.game_is_lander(game_is_lander),
+		.artwork_enable(custom_artwork_enable),
+		.artwork_blend(custom_artwork_blend),
+		.ioctl_download(ioctl_download),
+		.ioctl_wr(ioctl_wr),
+		.ioctl_index(ioctl_index),
+		.ioctl_addr(ioctl_addr),
+		.ioctl_data(ioctl_dout),
 		.off_dot_mode(status[30:28]),
 		.off_tone_mapping(off_tone_mapping),
 		.off_inter_frame_decay(status[119:118]),
@@ -467,6 +546,10 @@ module emu
 		.vsync(VGA_VS),
 		.mode_is_720p(video_is_720p),
 		.fifo_full(fifo_full),
+		.artwork_available(artwork_available),
+		.ioctl_wait(artwork_ioctl_wait),
+		.video_mode_toggle(video_mode_toggle),
+		.video_freeze(video_freeze),
 		.ddram_clk(DDRAM_CLK),
 		.ddram_busy(DDRAM_BUSY),
 		.ddram_burst_count(DDRAM_BURSTCNT),
@@ -490,7 +573,7 @@ module emu
 		.sdram_bank(SDRAM_BA)
 	);
 
-	assign CLK_VIDEO = clk_125;
+	assign CLK_VIDEO = clk_render;
 	assign VGA_R = paused_rgb[23:16];
 	assign VGA_G = paused_rgb[15:8];
 	assign VGA_B = paused_rgb[7:0];
@@ -499,7 +582,7 @@ module emu
 	assign VGA_SL = 2'b00;
 	assign VGA_SCALER = 1'b0;
 	assign VGA_DISABLE = 1'b0;
-	assign HDMI_FREEZE = 1'b0;
+	assign HDMI_FREEZE = video_freeze;
 	assign HDMI_BLACKOUT = 1'b0;
 	assign HDMI_BOB_DEINT = 1'b0;
 
@@ -508,9 +591,8 @@ module emu
 	assign AUDIO_S = 1'b1;
 	assign AUDIO_MIX = 2'b00;
 
-	// Lunar Lander exposes Start/Select, Training, Cadet, Prime, and Command
-	// lamps in bits 4..0. Set this parameter to route them across MiSTer's
-	// USER, DISK, and POWER indicators for a cabinet-specific build.
+	// Set to 1 only for a cabinet build that maps Lunar Lander's active-low
+	// Start/Select and mission lamps onto MiSTer's LEDs.
 	localparam logic ENABLE_LLANDER_MISTER_LEDS = 1'b0;
 	assign LED_USER = fifo_full || ioctl_download ||
 	                  (ENABLE_LLANDER_MISTER_LEDS &&

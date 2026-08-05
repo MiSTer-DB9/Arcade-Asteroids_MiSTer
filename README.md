@@ -32,7 +32,8 @@ please support my work and future updates:
 | **Mission Indicators** *(Lunar only)* | Four cabinet LEDs identify the selected mission | On-screen mission information shows the selected mission and its flight conditions |
 | **Persistent Storage** *(Deluxe only)* | 64-byte Atari ER2055 EAROM | ER2055-compatible EAROM with MiSTer NVRAM persistence |
 | **Display** | Monochrome XY vector monitor | Doubled-density Vector Doubler (shadow DVG) and high-resolution raster renderer for detailed Full HD output, with bloom, halo, phosphor decay, and selectable vector colors |
-| **Controls** | Digital ship controls in Asteroids/Deluxe; rotation, analog thrust lever, Abort, and mission selection in Lunar Lander | MiSTer joystick, analog controller, keyboard, and cabinet input mapping |
+| **Cabinet Backdrop** *(Deluxe upright only)* | Blacklight-illuminated 3D cardboard backdrop and raised inserts, viewed through a half-silvered mirror | Resolution-specific indexed artwork blended behind the vector display, with green and orange cabinet variants |
+| **Controls** | Digital ship controls in Asteroids/Deluxe; rotation, analog thrust lever, Abort, and mission selection in Lunar Lander | MiSTer joystick, analog controller, keyboard, spinner, mouse, and cabinet input mapping |
 
 ---
 
@@ -43,11 +44,15 @@ please support my work and future updates:
 | Input | Function |
 |---|---|
 | **Left / Right** | Rotate the ship |
+| **Spinner / Mouse** *(optional)* | Rotate the ship when **Rotation** is set to **Spinner / Mouse** |
 | **Fire (Button A)** | Fire |
 | **Thrust (Button B)** | Apply thrust |
 | **Hyperspace / Shield (Button X)** | Use Hyperspace in Asteroids or activate the shield in Asteroids Deluxe |
 | **Start 1 / Start 2** | Start a one-player or two-player game |
 | **Coin / Coin Right** | Operate the left or right coin mechanism |
+
+The **Input Controls** menu can optionally make Up activate thrust alongside
+the normal thrust button.
 
 ### Lunar Lander
 
@@ -56,10 +61,16 @@ stick for proportional thrust, matching the original cabinet's rotation
 buttons and thrust lever. For setups without a suitable analog control,
 Digital Thrust provides an on/off fallback.
 
+The **Input Controls** menu can assign proportional thrust to the left or
+right analog stick. **Half** range uses center-to-up travel for a
+self-centering stick; **Full** maps fully down to zero and fully up to maximum
+for throttle-style controls.
+
 | Input | Function |
 |---|---|
 | **Left / Right** | Rotate the lander |
-| **Analog Stick Up** | Operate the proportional thrust lever; this is the recommended control |
+| **Spinner / Mouse** *(optional)* | Rotate the lander when **Rotation** is set to **Spinner / Mouse** |
+| **Selected Analog Stick Up** | Operate the proportional thrust lever; this is the recommended control |
 | **Digital Thrust (Button A)** | Apply full thrust as a digital fallback |
 | **Abort Thrust (Button B)** | Initiate the emergency upright-rotation and maximum-thrust sequence |
 | **Start (Start)** | Start the currently selected mission |
@@ -77,9 +88,15 @@ The original cabinet indicated the selected mission through four dedicated
 LEDs. The core instead briefly displays the selected mission and its flight
 conditions on screen when the selection changes.
 
-Lunar Lander models the original approximately 3 kHz tracking ADC: the
-software-visible thrust value follows the requested lever position rather than
-jumping to it instantly.
+### Input Controls Menu
+
+| Option | Games | Function |
+|---|---|---|
+| **Rotation** | All three | Selects the original left/right buttons or spinner/mouse rotation. |
+| **Spinner Direction** | All three | Selects normal or reversed spinner/mouse direction; shown only in spinner/mouse mode. |
+| **Thrust** | Asteroids / Deluxe | Selects the thrust button alone or Up and the thrust button together. |
+| **Thrust Stick** | Lunar Lander | Selects the left or right analog stick for proportional thrust. |
+| **Thrust Range** | Lunar Lander | **Half** maps center-to-up travel; **Full** maps the complete down-to-up axis. |
 
 Asteroids exposes Service Mode and Diagnostic Step on its MRA DIP-switch page.
 Asteroids Deluxe exposes Service Mode and the Slam Switch.
@@ -120,6 +137,68 @@ The CRT-style video pipeline uses MiSTer SDRAM and requires a 32MB SDRAM
 module or larger. Use the included MRAs so the program ROMs, DVG PROM, controls,
 and DIP switches are configured correctly for each game.
 
+Two Asteroids Deluxe MRAs are supplied for the Rev 3 ROM set:
+`Asteroids Deluxe (v3 green).mra` and `Asteroids Deluxe (v3 orange).mra`.
+They reproduce the two known cabinet backdrop variants and contain
+resolution-specific indexed artwork for 240p, 480p, 720p, and 1080p. The
+Background controls are unavailable when the loaded MRA does not provide a
+valid artwork package.
+
+### Custom Asteroids Deluxe Artwork
+
+The artwork builder in the `artwork` directory can validate and compress a
+custom backdrop, then inject it into a new Asteroids Deluxe MRA. It requires
+Python 3 and Pillow (`pip install Pillow`). Supply exactly one indexed PNG for
+each supported output resolution:
+
+| Core Mode | Required PNG Size |
+|---|---|
+| **1080p** | 1360x1080 |
+| **720p** | 916x720 |
+| **480p** | 640x480 |
+| **240p** | 640x240 |
+
+Artwork is screen-fixed and does not follow the core's vector-orientation
+setting. This makes the tool useful for vertical-monitor installations: create
+the source artwork already rotated by 90 degrees for the intended physical
+display orientation, while retaining the required PNG dimensions above.
+
+Images must use PNG indexed-color (`P`) mode. A plane may use up to 16, 64, or
+256 palette entries; the builder automatically stores its indices at 4, 6, or
+8 bits. Indexed PNG transparency is supported and retained. The four planes
+can use different palettes or index depths.
+
+Run the builder from the repository root, passing the source MRA followed by
+the four PNGs:
+
+```powershell
+python artwork/build_artwork.py `
+  "releases/Asteroids Deluxe (v3 green).mra" `
+  "my_art/backdrop_1360x1080.png" `
+  "my_art/backdrop_916x720.png" `
+  "my_art/backdrop_640x480.png" `
+  "my_art/backdrop_640x240.png"
+```
+
+The source MRA is never modified. The ready-to-use result is written beside it
+with an `_art` suffix, for example
+`releases/Asteroids Deluxe (v3 green)_art.mra`. If that filename already
+exists, the builder uses `_art1`, `_art2`, and so on. Any existing artwork
+payload in the source is replaced only in the generated copy.
+
+Additional outputs are written to `artwork/generated`:
+
+- `<mra-name>.vart` is the compressed binary VART artwork container.
+- `rom_index_2.xml` is the complete ROM-index-2 XML element for manual use in
+  another MRA.
+- `artwork_stats.json` records validation, exact decoder round-trip results,
+  raw and compressed sizes, palette depth, transparency, and the three worst
+  compressed scanlines for every plane and for the complete package.
+
+The same compression summary is printed when the command completes. Use
+`--no-update-mra` to generate and verify these files without creating a new
+MRA.
+
 ---
 
 ## Recommended MiSTer Video Settings
@@ -138,8 +217,8 @@ mask are disabled so they do not alter the core's CRT-effects output.
 
 ```ini
 [Asteroids]
-video_mode=8
-vsync_adjust=2
+video_mode=8  ; 8 = 1080p
+vsync_adjust=1 ; Recommended for best frame cadence and compatibility. Try 2 for even lower latency
 vscale_mode=0
 hdmi_limited=0
 hdr=1
@@ -155,32 +234,82 @@ The empty filter entries override filters inherited from the global
 
 ### Direct Video and CRT Output
 
-When Direct Video is active, use **Direct Video Scan Rate** in Video Options to
-select 15 kHz (240p) or 31 kHz (480p) output.
+When Direct Video is active, use **Direct Video Scan Rate** under **Video Timing
+& Geometry** to select 15 kHz (240p) or 31 kHz (480p) output.
 
-When using a real CRT, start with **A Touch of CRT**, **Off**, or a **Custom**
-profile. Stronger profiles recreate characteristics that the tube may already
-provide, including bloom, halo, and phosphor persistence.
+Without Direct Video, select a `video_mode` with 479 active lines or fewer. The
+low-line mode is required for the core to select its 240p renderer. With
+`vga_scaler=0`, the analog VGA port uses the core's native 240p timing; with
+`vga_scaler=1`, it uses MiSTer's scaler timing as defined by `video_mode` or a
+manual modeline. Start with `640,240,60`. If the CRT does not lock, try
+`640,256,60` or a monitor-specific manual modeline.
+
+```ini
+[Asteroids]
+video_mode=640,240,60 ; For 15 kHz, vertical resolution must be 479 lines or fewer
+vga_scaler=0          ; 0 = core-native 240p timing; 1 = MiSTer modeline timing
+forced_scandoubler=0  ; Required for 15 kHz output
+vga_mode=rgb          ; Use RGB unless the display requires another signal format
+composite_sync=1      ; 1 = combined RGBS sync; 0 = separate RGBHV sync
+vsync_adjust=0        ; 0 = modeline refresh; try 1 for core-matched refresh
+vscale_mode=0         ; Experiment to find the best fit for the CRT
+hdmi_limited=0
+vfilter_default=
+vfilter_vertical_default=
+vfilter_scanlines_default=
+shmask_default=
+shmask_mode_default=0
+```
+
+If neither the core-native timing nor a fixed MiSTer modeline synchronizes
+reliably, `vga_scaler=1` with `vsync_adjust=1` is another option. MiSTer keeps
+the selected modeline's resolution and porch structure while adjusting its
+pixel clock to match the core's refresh rate.
+
+For RGBS, SCART, and most external-sync CRT connections, use
+`composite_sync=1`; MiSTer places combined sync on the VGA HSync pin. Use
+`composite_sync=0` only when the monitor expects separate HSync and VSync.
+Modeline flags such as `-hsync,-vsync` select electrical sync polarity rather
+than scan rate; negative sync is a common 240p starting point, but the monitor's
+requirements take precedence. Use `vga_mode=ypbpr` for component video and
+`vga_sog=1` only for equipment that explicitly requires sync on green.
+
+The same choices apply to 31/32 kHz CRT monitors. Use a modeline with at least
+480 but fewer than 720 active lines so the core selects its 480p renderer;
+`vga_scaler=0` then uses the core's native 480p timing, while `vga_scaler=1`
+uses the MiSTer modeline timing.
 
 ---
 
 ## Video Options
 
+### Video Profiles & Effects
+
 | Option | Description |
 |---|---|
-| **Aspect Ratio** | Optimized selects the intended core aspect, Stretched fills the display, and Pixel Perfect requests direct pixel mapping. |
-| **120Hz (720p only)** | Enables approximately 120Hz output when the active mode is 720p. |
+| **Profile** | Selects five fixed presets, two independent custom slots, or the effects-filter bypass path. |
+| **Background** | Blends the packaged Asteroids Deluxe artwork with the completed CRT-effects output. |
+| **Background Blend** | Sets artwork strength from 31.3% (`-4`) to 57.8% (`+3`); `0` uses the 40.6% default and `+2` uses 50%.
+| **Inter-Frame Decay** | Carries fading vector energy across completed frames. |
+| **Intra-Frame Decay** | Uses each pixel's recorded draw order to vary brightness within one vector frame. |
+
+Inter-Frame Decay models phosphor persistence lasting longer than one redraw.
+Intra-Frame Decay models brightness changes that become visible within a single
+vector frame. For a natural result, favor Inter-Frame Decay when the phosphor
+remains visible across redraws, or Intra-Frame Decay when it fades substantially
+during one redraw. Strongly combining both is primarily a stylized effect.
+
+### Video Timing & Geometry
+
+| Option | Description |
+|---|---|
+| **Orientation** | Provides all eight unique rotation and mirroring combinations. |
+| **Zoom** | Normal shows the full game area. Wide provides additional space around it. |
+| **Buffer Mode** | Selects EOF + VBL, VBL-only, or EOF-only frame presentation. |
+| **120Hz (720p only)** | Enables 120Hz output when the active mode is 720p. |
 | **61.52Hz (Authentic)** | Uses Atari's original Asteroids and Asteroids Deluxe frame cadence. Turn it off for 60Hz-compatible output. |
 | **Direct Video Scan Rate** | Selects 15 kHz (240p) or 31 kHz (480p) while Direct Video is active. |
-| **Buffer Mode** | Selects EOF + VBL, VBL-only, or EOF-only frame presentation. |
-| **Inter-Frame Decay** | Models phosphor persistence extending beyond one frame. Especially suitable for monochrome vector displays with long-retention phosphors. |
-| **Intra-Frame Decay** | Models decay within one frame using each pixel's recorded draw time. More suitable for later color vector games with longer redraw times and shorter phosphor persistence. |
-| **Profile** | Selects five fixed presets, two independent custom slots, or the effects-filter bypass path. |
-
-Intra-frame and inter-frame decay are independent profile settings. Fixed
-profiles select both automatically, while Off and the two custom profiles
-expose them directly. These modes normally need little overlap: use either one
-for a natural result, or combine them for deliberately spectacular effects.
+| **Aspect Ratio** | Optimized selects the intended core aspect, Stretched fills the display, and Pixel Perfect requests direct pixel mapping. |
 
 ### Video Profiles
 
@@ -190,22 +319,19 @@ for a natural result, or combine them for deliberately spectacular effects.
 | **A Touch of CRT** | Adds subtle CRT halo and bloom. |
 | **80s Cruise Control** | Adds stronger halo, bloom, and medium inter-frame decay. This is the default profile. |
 | **80s Overdrive** | Models a heavily driven arcade CRT with stronger glow and phosphor decay. |
-| **Neon Fever Dream** | Stylized high-energy vector presentation with excessive flashing bright lights. |
-| **Purple Haze** | Outside reality, where bright lines flash and fade but their glowing trails refuse to disappear. Impossible on a real CRT, spectacular in motion. |
+| **Red Alert** | Outside reality, where bright lines flash and fade but their glowing trails refuse to disappear. Impossible on a real CRT, spectacular in motion. |
+| **Ultraviolet** | Stylized high-energy vector presentation with excessive flashing bright lights. |
 | **Custom 1 / Custom 2** | Two independent user-configurable slots exposing the complete advanced effects controls. |
 
-> **Warning:** Neon Fever Dream and Purple Haze feature excessive
+> **Warning:** Red Alert and Ultraviolet feature excessive
 > flashing bright lights and should not be used by anyone sensitive to them.
 
 Both custom slots retain their own complete control set through MiSTer's
 **Save Settings** command.
 
-### Video Geometry
-
-| Option | Description |
-|---|---|
-| **Orientation** | Provides all eight unique rotation and mirroring combinations. |
-| **Zoom** | Normal shows the full game area. Wide provides additional space around it. |
+The exact game- and resolution-specific preset values are listed in
+[CRT Profile Settings](Profiles/README.md), making them easy to reproduce and
+modify in either custom slot.
 
 ---
 
@@ -215,15 +341,16 @@ Both custom slots retain their own complete control set through MiSTer's
                                 *** Attention ***
 
 ROMs are not included. Use the supplied Asteroids MRA with the matching MAME
-Asteroids Rev 4 ROM set, the Asteroids Deluxe MRA with the matching Asteroids
-Deluxe Rev 3 ROM set, or the Lunar Lander MRA with the matching Lunar Lander
-Rev 2 ROM set. Each MRA verifies its program ROMs, vector ROMs, and DVG state
-PROM by CRC.
+Asteroids Rev 4 ROM set, either Asteroids Deluxe backdrop MRA with the matching
+Asteroids Deluxe Rev 3 ROM set, or the Lunar Lander MRA with the matching Lunar
+Lander Rev 2 ROM set. Each MRA verifies its program ROMs, vector ROMs, and DVG
+state PROM by CRC.
 
 Quick reference for MiSTer SD-card placement:
 
 /_Arcade/Asteroids.mra
-/_Arcade/Asteroids Deluxe.mra
+/_Arcade/Asteroids Deluxe (v3 green).mra
+/_Arcade/Asteroids Deluxe (v3 orange).mra
 /_Arcade/Lunar Lander.mra
 /_Arcade/cores/Asteroids.rbf
 /games/mame/asteroid.zip

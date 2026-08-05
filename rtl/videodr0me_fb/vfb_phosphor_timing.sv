@@ -1,7 +1,7 @@
 // ============================================================================
-// videodr0me_fb: Phosphor timing
+// Phosphor timing.
 // written 2026 by Videodr0me
-// Measures source-frame cadence and converts draw phases to physical age.
+// Measures source frame rate and converts draw phases to physical age.
 // ============================================================================
 
 module vfb_phosphor_timing #(
@@ -119,8 +119,8 @@ module vfb_phosphor_timing #(
 	logic [63:0] buf_age_map [0:BUFFER_COUNT-1];
 	logic [3:0]  buf_frame_age [0:BUFFER_COUNT-1];
 	logic [BUFFER_COUNT-1:0] buf_metadata_ready;
-	// Capture skipped-frame age at composition start. Drops during an active
-	// composition remain queued for the following source frame.
+	// Frame age covers every drawn frame, including frames dropped before
+	// composition. Drops during composition carry into the next composition.
 	logic        compose_req_q;
 	logic [3:0]  skipped_frame_age;
 	logic [3:0]  compose_age_carry;
@@ -151,19 +151,14 @@ module vfb_phosphor_timing #(
 	logic                 have_vbl_reference;
 	logic [17:0]          vbl_age_tick_count;
 	logic [3:0]           vbl_elapsed_age;
-	logic                 presentation_120hz_meta;
-	logic                 presentation_120hz_sync;
+	logic                 presentation_120hz_control_q = 1'b0;
+	logic [1:0]           buffer_mode_q = 2'd0;
 	logic                 presentation_120hz_q;
 	logic                 presentation_vbl_half;
 
 	always_ff @(posedge clk_sys) begin
-		if (reset_sys) begin
-			presentation_120hz_meta <= 1'b0;
-			presentation_120hz_sync <= 1'b0;
-		end else begin
-			presentation_120hz_meta <= presentation_120hz;
-			presentation_120hz_sync <= presentation_120hz_meta;
-		end
+		presentation_120hz_control_q <= presentation_120hz;
+		buffer_mode_q <= BUFFER_MODE;
 	end
 
 	wire [15:0] popped_frame_tick_clks =
@@ -200,8 +195,7 @@ module vfb_phosphor_timing #(
 	wire [15:0] compose_phase_prng_next =
 		phase_prng_next(compose_phase_prng);
 
-	// Metadata normally completes before ST_DRAWN. If an extreme overrun wins
-	// that race, maximum decay is safer than retaining stale accumulator energy.
+	// If a dropped frame has no metadata, use maximum age instead.
 	wire [3:0] dropped_frame_age =
 		buf_metadata_ready[raw_frame_dropped_buf]
 			? buf_frame_age[raw_frame_dropped_buf] : 4'd15;
@@ -260,10 +254,10 @@ module vfb_phosphor_timing #(
 			end
 		end else begin
 			compose_req_q <= compose_req;
-			presentation_120hz_q <= presentation_120hz_sync;
+			presentation_120hz_q <= presentation_120hz_control_q;
 
-			// VBL-only buffers are timed as presentation snapshots rather than EOFs.
-			if (BUFFER_MODE != 2'd1) begin
+			// In VBL-only mode, derive age from display swaps instead of EOF.
+			if (buffer_mode_q != 2'd1) begin
 				have_vbl_reference <= 1'b0;
 				vbl_age_tick_count <= SYS_HALF_QUANTUM;
 				vbl_elapsed_age <= 4'd0;
@@ -295,10 +289,10 @@ module vfb_phosphor_timing #(
 					skipped_frame_age, dropped_frame_age);
 			end
 
-			if (presentation_120hz_sync != presentation_120hz_q) begin
+			if (presentation_120hz_control_q != presentation_120hz_q) begin
 				presentation_vbl_half <= 1'b0;
 			end else if (vbl_swap_req) begin
-				if (presentation_120hz_sync) begin
+				if (presentation_120hz_control_q) begin
 					presentation_vbl_half <= ~presentation_vbl_half;
 					if (!presentation_vbl_half) begin
 						readout_phase_prng <= readout_phase_prng_next;
@@ -344,7 +338,7 @@ module vfb_phosphor_timing #(
 					if (map_finishing_frame) begin
 						map_commit_pending <= 1'b1;
 						map_commit_store_buffer <= map_build_store_buffer &&
-							(BUFFER_MODE != 2'd1);
+							(buffer_mode_q != 2'd1);
 						map_commit_buf <= map_build_buf;
 						map_commit_data <= map_build_data;
 						map_commit_frame_age <= map_build_age;
@@ -373,14 +367,14 @@ module vfb_phosphor_timing #(
 				map_pending_buf <= buf_draw;
 				map_pending_tick <= popped_frame_tick_clks;
 				map_pending_elapsed_tick <= popped_elapsed_frame_tick_clks;
-				map_pending_store_buffer <= (BUFFER_MODE != 2'd1);
+				map_pending_store_buffer <= (buffer_mode_q != 2'd1);
 				map_pending <= 1'b1;
-				if (BUFFER_MODE != 2'd1) begin
+				if (buffer_mode_q != 2'd1) begin
 					buf_metadata_ready[buf_draw] <= 1'b0;
 				end
 			end
 
-			if ((BUFFER_MODE == 2'd1) && vbl_swap_req) begin
+			if ((buffer_mode_q == 2'd1) && vbl_swap_req) begin
 				buf_age_map[buf_draw] <= latest_age_map;
 				buf_frame_age[buf_draw] <= have_vbl_reference
 					? vbl_elapsed_age : 4'd0;

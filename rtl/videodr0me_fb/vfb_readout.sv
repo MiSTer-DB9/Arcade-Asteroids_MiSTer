@@ -1,9 +1,8 @@
 // ============================================================================
 // Framebuffer readout and phosphor-decay stage.
 // written 2026 by Videodr0me
-// Operates in the renderer/video clock domain.
-// Fetches tile rows via burst read, unpacks them to linear pixels, and
-// applies configured phosphor decay plus the hit-flash background.
+// Reads tile rows from DDRAM, converts them back to pixels, and applies
+// phosphor decay and optional background flash.
 // ============================================================================
 
 module vfb_readout #(
@@ -13,7 +12,7 @@ module vfb_readout #(
 	input  logic clk_sys,
 	input  logic reset,
 
-	// DDRAM arbiter interface
+	// DDRAM read interface
 	output logic        readout_ready,
 	input  logic        readout_grant,
 	output logic [15:0] readout_tile_id,
@@ -22,8 +21,9 @@ module vfb_readout #(
 	input  logic        readout_data_valid,
 
 	output logic        vbl_swap_req,
+	input  logic        frame_start_req,
 
-	// VGA interface (renderer domain, enable = ce_pix)
+	// Video output
 	output logic [7:0]  VGA_R,
 	output logic [7:0]  VGA_G,
 	output logic [7:0]  VGA_B,
@@ -52,23 +52,26 @@ module vfb_readout #(
 	output logic [14:0] display_tile_addr,
 	input  logic        display_tile_dirty
 );
+	import vfb_layout_pkg::*;
 
-	// Two rolling tile-row buffers, for 184 active tiles plus one
-	// blanking guard tile. The row is split into 2K and 1K banks.
+	// Two alternating row buffers hold 184 active tiles and one blanking guard
+	// tile. Each row is split between 2K and 1K banks.
 	localparam ROW_TILES = 185;
 	localparam ROW_LOW_WORDS = 2048;
 	localparam ROW_HIGH_WORDS = 1024;
+	logic [1:0] phosphor_mode_control_q = 2'd0;
+
+	always_ff @(posedge clk_sys)
+		phosphor_mode_control_q <= osd_phosphor_mode;
 
 	(* ramstyle = "M10K" *) logic [63:0] buffer_0_low [0:ROW_LOW_WORDS-1];
 	(* ramstyle = "M10K" *) logic [63:0] buffer_0_high [0:ROW_HIGH_WORDS-1];
 	(* ramstyle = "M10K" *) logic [63:0] buffer_1_low [0:ROW_LOW_WORDS-1];
 	(* ramstyle = "M10K" *) logic [63:0] buffer_1_high [0:ROW_HIGH_WORDS-1];
 
-	// buf_state indicates which buffer contains the current tile row being displayed.
 	logic buf_state;
 
-	// Registered timing inputs feed the tile-buffer address and line-edge logic.
-	// This adds one pixel of display latency.
+	// Register timing before tile addressing and edge detection.
 	logic [10:0] h_cnt_r, v_cnt_r;
 	logic        hsync_r, vsync_r, hblank_r, vblank_r;
 	always_ff @(posedge clk_sys) begin
@@ -91,10 +94,9 @@ module vfb_readout #(
 		end
 	end
 
-	// Edge detection and Frame Sync
+	// Detect line and VBLANK edges.
 	logic [10:0] prev_h_cnt;
 	logic        prev_hblank_r;
-	logic start_prefetch_row0;
 	logic advance_row;
 	logic [7:0] advance_fetch_y;
 
@@ -113,7 +115,6 @@ module vfb_readout #(
 		if (reset) begin
 			prev_h_cnt <= 0;
 			prev_hblank_r <= 1;
-			start_prefetch_row0 <= 0;
 			advance_row <= 0;
 			advance_fetch_y <= 0;
 			vbl_swap_req <= 0;
@@ -121,15 +122,13 @@ module vfb_readout #(
 			prev_h_cnt <= h_cnt_r;
 			prev_hblank_r <= hblank_r;
 
-			start_prefetch_row0 <= 0;
 			advance_row <= 0;
 			vbl_swap_req <= 0;
 
-			// Detect when h_cnt becomes 0 (start of a new line)
+			// Start a new output line.
 			if (h_cnt_r == 0 && prev_h_cnt != 0) begin
 				if (v_cnt_r == RENDER_HEIGHT) begin
-					// VBLANK starts: prefetch row 0.
-					start_prefetch_row0 <= 1;
+					// VBLANK starts: request a display-buffer handoff.
 					vbl_swap_req <= 1;
 				end
 			end
@@ -148,15 +147,14 @@ module vfb_readout #(
 		end
 	end
 
-	// Buffer Filling State Machine
+	// Fill row buffers.
 
-	// Registered tile-grid dimensions used by the fetch FSM. These change only
-	// on video mode switches.
+	// Tile-grid dimensions change only with the video mode.
 	logic [8:0] render_tile_cols;  // ceil(RENDER_WIDTH / 8)
 	logic [8:0] render_tile_rows;  // ceil(RENDER_HEIGHT / 8)
 	always_ff @(posedge clk_sys) begin
-		render_tile_cols <= 9'(((RENDER_WIDTH  + 12'd7) >> 3));
-		render_tile_rows <= 9'(((RENDER_HEIGHT + 12'd7) >> 3));
+		render_tile_cols <= vfb_tile_columns(RENDER_WIDTH);
+		render_tile_rows <= vfb_tile_rows(RENDER_HEIGHT);
 	end
 
 	logic [7:0] fetch_tile_x;
@@ -169,21 +167,12 @@ module vfb_readout #(
 	logic [4:0] zero_word_cnt;  // 0 to 15 for inline zeroing
 	logic [8:0] burst_beat_cnt; // Up to 256 for BURST_DATA
 
-	function automatic logic [14:0] tile_row_addr(input logic [7:0] tile_y);
-		logic [15:0] row_base;
-		begin
-			row_base = ({8'd0, tile_y} << 7)
-			         + ({8'd0, tile_y} << 6);
-			tile_row_addr = row_base[14:0];
-		end
-	endfunction
-
 	assign display_tile_addr = fetch_tile_addr;
 
 	wire row_end = ({4'd0, fetch_tile_x} + 12'd1 >= {3'd0, render_tile_cols});
 	wire row_done = ({4'd0, fetch_tile_x} >= {3'd0, render_tile_cols});
 
-	// Pipelined BRAM Write Registers
+	// Row-buffer write pipeline.
 	logic        bram_we_r;
 	logic        bram_buf_r;
 	logic [11:0] bram_addr_r;
@@ -198,10 +187,8 @@ module vfb_readout #(
 			fetch_tile_addr <= 0;
 			row0_prefetch_active <= 0;
 		end else begin
-			// Force unconditional resync on VBLANK. If the readout module was
-			// temporarily starved by arbiter congestion, it drops the current
-			// fetch and realigns to row 0.
-			if (start_prefetch_row0) begin
+			// At each display handoff, abandon an incomplete fetch and restart at row 0.
+			if (frame_start_req) begin
 				buf_state <= 0; // Reset rolling buffer
 				target_fetch_y <= 0;
 				fetch_tile_x <= 0;
@@ -216,11 +203,10 @@ module vfb_readout #(
 						if (advance_row) begin
 							buf_state <= ~buf_state;
 							target_fetch_y <= advance_fetch_y;
-							// Only fetch if the row after the prepared display
-							// row is within render height.
+							// Fetch only if the following row is visible.
 							if ({1'b0, advance_fetch_y} < render_tile_rows) begin
 								fetch_tile_x <= 0;
-								fetch_tile_addr <= tile_row_addr(advance_fetch_y);
+								fetch_tile_addr <= vfb_tile_row_addr(advance_fetch_y);
 								run_length <= 0;
 								fetch_state <= SCAN_WAIT;
 							end
@@ -237,32 +223,30 @@ module vfb_readout #(
 						if (run_length == 0) run_start_x <= fetch_tile_x;
 
 						if (row_end) begin
-							// End of row: burst the run including this tile
+						// End the row with a run that includes this tile.
 							run_length <= run_length + 5'd1;
 							fetch_tile_x <= fetch_tile_x + 8'd1;
 							fetch_tile_addr <= fetch_tile_addr + 15'd1;
 							fetch_state <= BURST_REQ;
 						end else if (run_length + 5'd1 == MAX_BURST_TILES[4:0]) begin
-							// Max burst limit reached
+						// The run reached the burst limit.
 							run_length <= run_length + 5'd1;
 							fetch_tile_x <= fetch_tile_x + 8'd1;
 							fetch_tile_addr <= fetch_tile_addr + 15'd1;
 							fetch_state <= BURST_REQ;
 						end else begin
-							// Continue scanning
+						// Continue along the row.
 							run_length <= run_length + 5'd1;
 							fetch_tile_x <= fetch_tile_x + 8'd1;
 							fetch_tile_addr <= fetch_tile_addr + 15'd1;
 							fetch_state <= SCAN_WAIT;
 						end
 					end else begin
-						// Clean tile found
-						if (run_length > 0) begin
-							// We have an active run of dirty tiles. We must burst them first.
-							// Do NOT advance fetch_tile_x so we evaluate this clean tile again.
+					if (run_length > 0) begin
+						// Request the pending dirty run before checking this clean tile again.
 							fetch_state <= BURST_REQ;
 						end else begin
-							// No active run. Zero this clean tile inline.
+						// No dirty run is pending; clear the clean tile locally.
 							zero_word_cnt <= 0;
 							fetch_state <= ZERO_DATA;
 						end
@@ -278,7 +262,7 @@ module vfb_readout #(
 								target_fetch_y <= 8'd1;
 								if (render_tile_rows > 9'd1) begin
 									fetch_tile_x <= 0;
-									fetch_tile_addr <= 15'd192;
+									fetch_tile_addr <= vfb_tile_row_addr(8'd1);
 									run_length <= 0;
 									fetch_state <= SCAN_WAIT;
 								end else begin
@@ -316,7 +300,6 @@ module vfb_readout #(
 					if (readout_data_valid) begin
 						if (burst_beat_cnt + 9'd1 == readout_burstcnt) begin
 							run_length <= 0;
-							// If we hit the end of the row, go to IDLE
 							if (row_done) begin
 								if (row0_prefetch_active) begin
 									row0_prefetch_active <= 0;
@@ -324,7 +307,7 @@ module vfb_readout #(
 									target_fetch_y <= 8'd1;
 									if (render_tile_rows > 9'd1) begin
 										fetch_tile_x <= 0;
-										fetch_tile_addr <= 15'd192;
+										fetch_tile_addr <= vfb_tile_row_addr(8'd1);
 										run_length <= 0;
 										fetch_state <= SCAN_WAIT;
 									end else begin
@@ -344,7 +327,7 @@ module vfb_readout #(
 				endcase
 			end
 
-			// Pipelined BRAM writes
+			// Write the prepared row-buffer word.
 			bram_we_r <= 0;
 			if (fetch_state == BURST_DATA && readout_data_valid) begin
 				bram_we_r   <= 1;
@@ -374,17 +357,8 @@ module vfb_readout #(
 		end
 	end
 
-	// Unpacker & Sync Pipeline
-
-	// Delay pipeline for VGA syncs.
-	//
-	// Pixel path is six ce_pix edges from raw h_cnt/v_cnt to the registered
-	// VGA RGB packet:
-	//   input register -> M10K read -> word mux -> pixel extract
-	//   -> decode/LUT register -> final intensity register -> output register.
-	//
-	// Sync/blank take the same effective six-edge path. The final output stage
-	// samples the pre-output pipe tap and registers RGB plus sync/blank together.
+	// Convert tile words back to pixels.
+	// RGB and sync/blank follow the same six-ce_pix path to the output register.
 	localparam READ_ADVANCE = 6;
 
 	logic [READ_ADVANCE-1:0] hs_pipe, vs_pipe, hb_pipe, vb_pipe;
@@ -403,14 +377,12 @@ module vfb_readout #(
 		end
 	end
 
-	// Final sync/blank packet for the registered RGB output stage.
-	// RGB and timing are sampled from the same pre-output pipe tap.
 	wire vga_hs_pre     = hs_pipe[READ_ADVANCE-2];
 	wire vga_vs_pre     = vs_pipe[READ_ADVANCE-2];
 	wire vga_hblank_pre = hb_pipe[READ_ADVANCE-2];
 	wire vga_vblank_pre = vb_pipe[READ_ADVANCE-2];
 
-	// Pixel Read Addresses
+	// Pixel read addresses.
 	wire [7:0] cur_tile_x = h_cnt_r[10:3];
 	wire [5:0] cur_offset = {v_cnt_r[2:0], h_cnt_r[2:0]};
 	wire [7:0] safe_tile_x =
@@ -461,9 +433,9 @@ module vfb_readout #(
 		end
 	end
 
-	// Phosphor decay and RGB formatting
+	// Phosphor decay and RGB conversion.
 
-	// Pipeline Stage A: decode + decay LUT
+	// Decode the pixel and select its decay factor.
 	wire [2:0] pixel_rgb_comb = raw_pixel[15:13];
 	wire [8:0] pixel_int_comb = raw_pixel[8:0];
 
@@ -477,7 +449,7 @@ module vfb_readout #(
 	// and 0.98 across 16 ages.
 	reg [7:0] decay_factor_comb;
 	always_comb begin
-		case ({osd_phosphor_mode, pixel_age})
+		case ({phosphor_mode_control_q, pixel_age})
 			// LUT A (mode 1, base 0.94)
 			{2'd1, 4'd0}:  decay_factor_comb = 8'd255;
 			{2'd1, 4'd1}:  decay_factor_comb = 8'd240;
@@ -529,12 +501,12 @@ module vfb_readout #(
 			{2'd3, 4'd13}: decay_factor_comb = 8'd196;
 			{2'd3, 4'd14}: decay_factor_comb = 8'd192;
 			{2'd3, 4'd15}: decay_factor_comb = 8'd188;
-			// Off (mode 0) is handled by the bypass mux in stage B.
+			// Off mode selects full intensity in the following stage.
 			default: decay_factor_comb = 8'd255;
 		endcase
 	end
 
-	// Register LUT output with the decoded pixel fields.
+	// Register the decay factor with the decoded pixel.
 	logic [7:0] decay_factor_r;
 	logic [8:0] pixel_int_r;
 	logic [2:0] pixel_rgb_r;
@@ -545,21 +517,20 @@ module vfb_readout #(
 			decay_factor_r <= decay_factor_comb;
 			pixel_int_r    <= pixel_int_comb;
 			pixel_rgb_r    <= pixel_rgb_comb;
-			phosphor_mode_r <= osd_phosphor_mode;
+			phosphor_mode_r <= phosphor_mode_control_q;
 			display_composed_r <= display_is_composed;
 		end
 	end
 
-	// Pipeline Stage B: multiply + bypass mux
+	// Apply decay or keep the original intensity.
 	wire [16:0] decayed_full = pixel_int_r * decay_factor_r;  // 9x8 = 17 bits
 	wire [8:0]  decayed_int  = decayed_full[16:8];            // >>8
 
-	// Off mode passes pixel_int without modification.
 	wire [8:0] final_int_comb =
 		(display_composed_r || (phosphor_mode_r == 2'd0))
 			? pixel_int_r : decayed_int;
 
-	// Register multiply output before excess/spill conversion.
+	// Register intensity before excess and spill conversion.
 	logic [8:0] final_int;
 	logic [2:0] pixel_rgb;
 	always_ff @(posedge clk_sys) begin
@@ -569,9 +540,8 @@ module vfb_readout #(
 		end
 	end
 
-	// For overflowed non-white pixels, clamp selected channels to 232 and split
-	// excess intensity across unselected channels, capped at 64. White remains
-	// saturated at 255.
+	// For non-white pixels above 255, hold selected channels at 232 and spill
+	// excess into the others, up to 64. White saturates at 255.
 	localparam logic [7:0] OVERFLOW_MAIN_CEIL = 8'd232;
 	localparam logic [8:0] OVERFLOW_SPILL_BASE = 9'd232;
 	localparam logic [8:0] OVERFLOW_SPILL_CAP = 9'd64;
@@ -667,7 +637,7 @@ module vfb_readout #(
 
 			if (~vga_hblank_pre && ~vga_vblank_pre) begin
 				if (final_int == 9'd0 || pixel_rgb == 3'b000) begin
-					// Background flash effect for black pixels
+					// Flash effect for background pixels.
 					VGA_R <= FLASH_PARAM[23:16];
 					VGA_G <= FLASH_PARAM[15:8];
 					VGA_B <= FLASH_PARAM[7:0];

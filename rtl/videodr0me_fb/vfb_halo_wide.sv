@@ -2,29 +2,29 @@
 // Broad, low-resolution halo generator.
 // written 2026 by Videodr0me
 //
-// Builds a coarse 16x16 halo image, applies one of four symmetric,
-// equal-gain eight-tap kernels, then reconstructs full-rate pixels. Mode 0 is
-// near-uniform; modes 1 through 3 range from strongly peaked to broad.
+// Reduces each 16x16 source cell to one sample, applies one of four symmetric
+// equal-gain eight-tap filters, and reconstructs full-resolution RGB. Mode 0
+// is the original peaked filter; modes 1 through 3 grow progressively broader.
 // ============================================================================
 
 module vfb_halo_wide #(
 	parameter integer MAX_WIDTH = 1472,
 	parameter integer SCALE = 16,
 	parameter integer H_DELAY = 80,
-	parameter integer COARSE_WIDTH = MAX_WIDTH / SCALE
+	parameter integer COARSE_WIDTH = MAX_WIDTH / SCALE,
+	parameter logic [11:0] RECONSTRUCTION_DELAY_LINES = 12'd71
 ) (
 	input  logic        clk_sys,
 	input  logic        reset,
 	input  logic        ce_pix,
 
-	input  logic [9:0]  bloom_curve_gain,
+	input  logic [2:0]  halo_curve_mode,
 	input  logic [1:0]  halo_spread_mode,
+	input  logic [1:0]  halo_knee_mode,
 	input  logic [11:0] active_height,
 	input  logic [7:0]  VGA_R_IN,
 	input  logic [7:0]  VGA_G_IN,
 	input  logic [7:0]  VGA_B_IN,
-	input  logic        VGA_HS_IN,
-	input  logic        VGA_VS_IN,
 	input  logic        VGA_HBLANK_IN,
 	input  logic        VGA_VBLANK_IN,
 
@@ -35,7 +35,6 @@ module vfb_halo_wide #(
 );
 
 	localparam integer COARSE_W = $clog2(COARSE_WIDTH + 5);
-	localparam [11:0] RECONSTRUCTION_DELAY_LINES = 12'd71;
 	localparam [3:0] RECON_SAMPLE_X_ADVANCE = 4'd3;
 	localparam [3:0] RECON_SAMPLE_Y_ADVANCE = 4'd7;
 	localparam [7:0] VERTICAL_CENTER_DELAY_ROWS = 8'd3;
@@ -43,6 +42,21 @@ module vfb_halo_wide #(
 		VERTICAL_CENTER_DELAY_ROWS - 8'd1;
 	localparam [7:0] RECON_FIRST_ROW = VERTICAL_PREVIOUS_DELAY_ROWS;
 	localparam [1:0] RECON_FIRST_BANK = 2'd2;
+	logic [2:0] halo_curve_mode_q = 3'd0;
+	logic [1:0] halo_spread_mode_q = 2'd0;
+	logic       halo_knee_enable_q = 1'b0;
+	logic [4:0] halo_knee_threshold_q = 5'd8;
+
+	always_ff @(posedge clk_sys) begin
+		halo_curve_mode_q <= halo_curve_mode;
+		halo_spread_mode_q <= halo_spread_mode;
+		halo_knee_enable_q <= (halo_knee_mode != 2'd0);
+		case (halo_knee_mode)
+			2'd2: halo_knee_threshold_q <= 5'd16;
+			2'd3: halo_knee_threshold_q <= 5'd24;
+			default: halo_knee_threshold_q <= 5'd8;
+		endcase
+	end
 
 	initial begin
 		if (SCALE != 16)
@@ -51,88 +65,53 @@ module vfb_halo_wide #(
 			$error("vfb_halo_wide MAX_WIDTH must be divisible by SCALE");
 	end
 
-	// Halo source curve and gain.
-	// Three 256x8 ROMs provide one independent same-cycle square lookup per RGB
-	// channel before the shared curve gain is applied.
-	function automatic [7:0] square8_value(input logic [7:0] value);
+	function automatic [7:0] halo_curve_value(
+		input logic [2:0] mode,
+		input logic [7:0] value
+	);
+		integer squared;
 		integer scaled;
 		begin
-			scaled = (value * value + 127) / 255;
-			square8_value = scaled[7:0];
+			squared = (value * value + 127) / 255;
+			case (mode)
+				3'd0: scaled = squared >> 2;
+				3'd1: scaled = (3 * squared + 4) >> 3;
+				3'd2: scaled = squared >> 1;
+				3'd3: scaled = (3 * squared + 2) >> 2;
+				3'd4: scaled = squared;
+				3'd5: scaled = (5 * squared + 2) >> 2;
+				3'd6: scaled = (3 * squared + 1) >> 1;
+				default: scaled = squared << 1;
+			endcase
+			halo_curve_value =
+				(scaled > 255) ? 8'hff : scaled[7:0];
 		end
 	endfunction
 
-	(* ramstyle = "MLAB" *) logic [7:0] square8_rom_r [0:255];
-	(* ramstyle = "MLAB" *) logic [7:0] square8_rom_g [0:255];
-	(* ramstyle = "MLAB" *) logic [7:0] square8_rom_b [0:255];
+	(* ramstyle = "M10K" *) logic [7:0] halo_curve_rom_rg [0:2047];
+	(* ramstyle = "M10K" *) logic [7:0] halo_curve_rom_b [0:2047];
 
-	integer square8_init_i;
+	integer halo_curve_mode_i;
+	integer halo_curve_value_i;
+	integer halo_curve_addr_i;
 	initial begin
-		for (square8_init_i = 0;
-		     square8_init_i < 256;
-		     square8_init_i = square8_init_i + 1) begin
-			square8_rom_r[square8_init_i] =
-				square8_value(square8_init_i[7:0]);
-			square8_rom_g[square8_init_i] =
-				square8_value(square8_init_i[7:0]);
-			square8_rom_b[square8_init_i] =
-				square8_value(square8_init_i[7:0]);
+		// Precompute squared = (value * value + 127) / 255, followed by the
+		// selected gain, rounding, and saturation.
+		for (halo_curve_mode_i = 0; halo_curve_mode_i < 8;
+		     halo_curve_mode_i = halo_curve_mode_i + 1) begin
+			for (halo_curve_value_i = 0; halo_curve_value_i < 256;
+			     halo_curve_value_i = halo_curve_value_i + 1) begin
+				halo_curve_addr_i =
+					(halo_curve_mode_i << 8) | halo_curve_value_i;
+				halo_curve_rom_rg[halo_curve_addr_i] = halo_curve_value(
+					halo_curve_mode_i[2:0],
+					halo_curve_value_i[7:0]);
+				halo_curve_rom_b[halo_curve_addr_i] = halo_curve_value(
+					halo_curve_mode_i[2:0],
+					halo_curve_value_i[7:0]);
+			end
 		end
 	end
-
-	function automatic [7:0] apply_curve_gain(
-		input logic [7:0] squared,
-		input logic [9:0] gain
-	);
-		logic [11:0] scaled;
-		logic [8:0] scaled9;
-		begin
-			case (gain)
-				10'd64: begin
-					apply_curve_gain = {2'b00, squared[7:2]};
-				end
-				10'd96: begin
-					scaled =
-						({4'd0, squared} << 1) +
-						{4'd0, squared} + 12'd4;
-					apply_curve_gain = {1'b0, scaled[9:3]};
-				end
-				10'd128: begin
-					apply_curve_gain = {1'b0, squared[7:1]};
-				end
-				10'd192: begin
-					scaled =
-						({4'd0, squared} << 1) +
-						{4'd0, squared} + 12'd2;
-					apply_curve_gain = scaled[9:2];
-				end
-				10'd256: begin
-					apply_curve_gain = squared;
-				end
-				10'd320: begin
-					scaled =
-						({4'd0, squared} << 2) +
-						{4'd0, squared} + 12'd2;
-					scaled9 = scaled[10:2];
-					apply_curve_gain =
-						scaled9[8] ? 8'hff : scaled9[7:0];
-				end
-				10'd384: begin
-					scaled =
-						({4'd0, squared} << 1) +
-						{4'd0, squared} + 12'd1;
-					scaled9 = scaled[9:1];
-					apply_curve_gain =
-						scaled9[8] ? 8'hff : scaled9[7:0];
-				end
-				default: begin
-					apply_curve_gain =
-						squared[7] ? 8'hff :
-						{squared[6:0], 1'b0};
-				end
-			endcase
-		end
-	endfunction
 
 	logic [7:0] source_in_r_q;
 	logic [7:0] source_in_g_q;
@@ -140,14 +119,6 @@ module vfb_halo_wide #(
 	logic source_in_hblank_q;
 	logic source_in_vblank_q;
 
-	wire [7:0] source_r = apply_curve_gain(
-		square8_rom_r[source_in_r_q], bloom_curve_gain);
-	wire [7:0] source_g = apply_curve_gain(
-		square8_rom_g[source_in_g_q], bloom_curve_gain);
-	wire [7:0] source_b = apply_curve_gain(
-		square8_rom_b[source_in_b_q], bloom_curve_gain);
-
-	// Register the curved source before the box accumulator.
 	logic [7:0] source_r_q;
 	logic [7:0] source_g_q;
 	logic [7:0] source_b_q;
@@ -155,6 +126,18 @@ module vfb_halo_wide #(
 	logic source_vblank_q;
 	logic source_hblank_d;
 	logic source_vblank_d;
+
+	// Two synchronous ROMs provide simultaneous R, G, and B curve samples.
+	always_ff @(posedge clk_sys) begin
+		if (ce_pix) begin
+			source_r_q <= halo_curve_rom_rg[
+				{halo_curve_mode_q, source_in_r_q}];
+			source_g_q <= halo_curve_rom_rg[
+				{halo_curve_mode_q, source_in_g_q}];
+			source_b_q <= halo_curve_rom_b[
+				{halo_curve_mode_q, source_in_b_q}];
+		end
+	end
 
 	// 16x16 coarse source reducer
 	logic hblank_d;
@@ -440,9 +423,6 @@ module vfb_halo_wide #(
 			source_in_b_q <= 8'd0;
 			source_in_hblank_q <= 1'b1;
 			source_in_vblank_q <= 1'b1;
-			source_r_q <= 8'd0;
-			source_g_q <= 8'd0;
-			source_b_q <= 8'd0;
 			source_hblank_q <= 1'b1;
 			source_vblank_q <= 1'b1;
 			source_hblank_d <= 1'b1;
@@ -560,6 +540,16 @@ module vfb_halo_wide #(
 			low_valid <= low_select_valid;
 			sample_valid <= next_sample_valid;
 			acc_stage_valid <= sample_valid;
+			sample_x <= next_sample_x;
+			sample_phase <= next_sample_phase;
+			sample_y <= next_sample_y;
+			sample_epoch <= next_sample_epoch;
+			sample_r <= next_sample_r;
+			sample_g <= next_sample_g;
+			sample_b <= next_sample_b;
+			sample_max_r <= next_sample_max_r;
+			sample_max_g <= next_sample_max_g;
+			sample_max_b <= next_sample_max_b;
 			if (low_total_valid) begin
 				low_reduce_x <= low_total_x;
 				low_reduce_y <= low_total_y;
@@ -612,18 +602,6 @@ module vfb_halo_wide #(
 						low_select_mode)
 				};
 			end
-			if (next_sample_valid) begin
-				sample_x <= next_sample_x;
-				sample_phase <= next_sample_phase;
-				sample_y <= next_sample_y;
-				sample_epoch <= next_sample_epoch;
-				sample_r <= next_sample_r;
-				sample_g <= next_sample_g;
-				sample_b <= next_sample_b;
-				sample_max_r <= next_sample_max_r;
-				sample_max_g <= next_sample_max_g;
-				sample_max_b <= next_sample_max_b;
-			end
 			if (sample_valid) begin
 				acc_stage_x <= sample_x;
 				acc_stage_phase <= sample_phase;
@@ -650,9 +628,6 @@ module vfb_halo_wide #(
 				source_in_b_q <= VGA_B_IN;
 				source_in_hblank_q <= VGA_HBLANK_IN;
 				source_in_vblank_q <= VGA_VBLANK_IN;
-				source_r_q <= source_r;
-				source_g_q <= source_g;
-				source_b_q <= source_b;
 				source_hblank_q <= source_in_hblank_q;
 				source_vblank_q <= source_in_vblank_q;
 				source_hblank_d <= source_hblank_q;
@@ -685,7 +660,7 @@ module vfb_halo_wide #(
 				logic [7:0] tail_limit_y;
 
 				tail_limit_y =
-					reduced_height + VERTICAL_CENTER_DELAY_ROWS;
+					reduced_height + VERTICAL_CENTER_DELAY_ROWS + 8'd1;
 				tail_service_first_live_y_q <=
 					tail_service_frame_first_live_y_q;
 				source_epoch <= next_source_epoch;
@@ -764,8 +739,8 @@ module vfb_halo_wide #(
 				if (v_phase == 4'd15)
 					reduce_y <= reduce_y + 1'b1;
 
-				// VBLANK service emits post-visible black rows so the halo tail
-				// advances in physical scanline distance.
+				// Add black rows during VBLANK so the halo fades below the final
+				// visible line.
 				if (source_vblank_q && coarse_width != 0) begin
 					zero_fill_active <= 1'b1;
 					zero_fill_x <= '0;
@@ -819,7 +794,7 @@ module vfb_halo_wide #(
 					low_total_x <= acc_stage_x;
 					low_total_y <= acc_stage_y;
 					low_total_epoch <= acc_stage_epoch;
-					low_total_mode <= halo_spread_mode;
+					low_total_mode <= halo_spread_mode_q;
 					low_total_r <= total_r;
 					low_total_g <= total_g;
 					low_total_b <= total_b;
@@ -962,8 +937,7 @@ module vfb_halo_wide #(
 		end
 	endfunction
 
-	// Packed history stores the seven earlier reduced rows for one coarse
-	// x address.
+	// Each coarse x position stores the previous seven reduced rows.
 	(* ramstyle = "MLAB, no_rw_check" *)
 	logic [167:0] blur_history_0 [0:COARSE_WIDTH-1];
 	(* ramstyle = "MLAB, no_rw_check" *)
@@ -1139,7 +1113,7 @@ module vfb_halo_wide #(
 			vertical_mask_x <= blur_stage_x;
 			vertical_mask_y <= blur_stage_y;
 			vertical_mask_epoch <= blur_stage_epoch;
-			vertical_mask_spread_mode <= halo_spread_mode;
+			vertical_mask_spread_mode <= halo_spread_mode_q;
 			vertical_tap_0 <= mask_rgb(
 				blur_stage_rgb, blur_stage_tap_valid[0]);
 			vertical_tap_1 <= mask_rgb(
@@ -1273,6 +1247,7 @@ module vfb_halo_wide #(
 	logic [7:0] flush_y;
 	logic [COARSE_W-1:0] horizontal_step_x;
 	logic horizontal_step_valid;
+	logic horizontal_row_start;
 	logic horizontal_step_epoch;
 	logic [7:0] horizontal_step_y;
 	logic [23:0] horizontal_step_rgb;
@@ -1301,6 +1276,9 @@ module vfb_halo_wide #(
 	logic horizontal_candidate_row_complete;
 	logic [COARSE_W-1:0] horizontal_candidate_x;
 	logic [1:0] horizontal_candidate_bank;
+	logic horizontal_candidate_epoch;
+	logic [7:0] horizontal_candidate_y;
+	logic horizontal_candidate_safe;
 	logic horizontal_current_tap_valid;
 	logic [6:0] horizontal_candidate_history_valid;
 	logic [23:0] horizontal_candidate_tap_0;
@@ -1358,9 +1336,15 @@ module vfb_halo_wide #(
 		horizontal_step_y = flush_active ? flush_y : vertical_blur_y;
 		horizontal_step_rgb = flush_active ? 24'd0 : vertical_blur_rgb;
 
+		horizontal_row_start =
+			vertical_blur_valid &&
+			!flush_active &&
+			(vertical_blur_x == '0);
 		horizontal_current_tap_valid =
-			(horizontal_step_x < coarse_width);
-		horizontal_candidate_history_valid = (horizontal_step_x == 0)
+			vertical_blur_valid &&
+			!flush_active &&
+			(vertical_blur_x < coarse_width);
+		horizontal_candidate_history_valid = horizontal_row_start
 			? 7'd0 : h_valid_history;
 		horizontal_candidate_tap_0 = horizontal_step_rgb;
 		horizontal_candidate_tap_1 = mask_rgb(
@@ -1378,27 +1362,35 @@ module vfb_halo_wide #(
 		horizontal_candidate_tap_7 = mask_rgb(
 			h_history[6], horizontal_candidate_history_valid[6]);
 
-		horizontal_candidate_x = '0;
-		if (horizontal_step_x >= 4)
+		if (horizontal_step_x < 4)
+			horizontal_candidate_x = coarse_width + horizontal_step_x;
+		else
 			horizontal_candidate_x = horizontal_step_x - 3'd4;
-		horizontal_candidate_bank = (horizontal_step_x == 0)
+		horizontal_candidate_bank = horizontal_row_start
 			? write_bank[horizontal_step_epoch] : horizontal_row_bank;
+		horizontal_candidate_epoch = horizontal_row_start
+			? horizontal_step_epoch : horizontal_row_epoch;
+		horizontal_candidate_y = horizontal_row_start
+			? horizontal_step_y : horizontal_row_y;
+		horizontal_candidate_safe = horizontal_row_start
+			? vertical_blur_safe : horizontal_row_safe;
 		horizontal_candidate_valid =
 			horizontal_step_valid &&
-			(horizontal_step_x >= 4) &&
-			(horizontal_candidate_x < coarse_width) &&
-			(horizontal_row_y >= RECON_FIRST_ROW);
+			((horizontal_step_x < 4) ||
+			 (horizontal_candidate_x < coarse_width)) &&
+			(horizontal_candidate_y >= RECON_FIRST_ROW);
 		horizontal_candidate_row_complete =
+			(horizontal_step_x >= 4) &&
 			(horizontal_candidate_x + 1'b1 >= coarse_width) &&
-			horizontal_row_safe;
+			horizontal_candidate_safe;
 	end
 
-	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_0a [0:COARSE_WIDTH-1];
-	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_1a [0:COARSE_WIDTH-1];
-	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_2a [0:COARSE_WIDTH-1];
-	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_0b [0:COARSE_WIDTH-1];
-	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_1b [0:COARSE_WIDTH-1];
-	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_2b [0:COARSE_WIDTH-1];
+	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_0a [0:COARSE_WIDTH+3];
+	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_1a [0:COARSE_WIDTH+3];
+	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_2a [0:COARSE_WIDTH+3];
+	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_0b [0:COARSE_WIDTH+3];
+	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_1b [0:COARSE_WIDTH+3];
+	(* ramstyle = "MLAB, no_rw_check" *) logic [23:0] halo_row_2b [0:COARSE_WIDTH+3];
 	logic horizontal_write_valid;
 	logic horizontal_write_row_complete;
 	logic [COARSE_W-1:0] horizontal_write_x;
@@ -1406,6 +1398,28 @@ module vfb_halo_wide #(
 	logic [1:0] horizontal_write_bank;
 	logic horizontal_write_epoch;
 	logic [7:0] horizontal_write_y;
+
+	function automatic [7:0] compress_filtered_energy(
+		input logic [7:0] energy,
+		input logic       compression_enable,
+		input logic [4:0] knee_threshold
+	);
+		logic [8:0] delta;
+		logic [10:0] soft_scaled;
+		logic [8:0] mapped;
+		begin
+			if (!compression_enable || ({3'd0, knee_threshold} >= energy)) begin
+				mapped = {1'b0, energy};
+			end else begin
+				delta = {1'b0, energy} - {4'd0, knee_threshold};
+				soft_scaled = ({2'd0, delta} << 1) +
+				              {2'd0, delta} + 11'd4;
+				mapped = {4'd0, knee_threshold} + soft_scaled[10:3];
+			end
+			compress_filtered_energy =
+				(mapped > 9'd255) ? 8'hff : mapped[7:0];
+		end
+	endfunction
 
 	function automatic [1:0] bank_for_reduced_y(
 		input logic [7:0] y
@@ -1543,9 +1557,9 @@ module vfb_halo_wide #(
 				horizontal_candidate_row_complete;
 			horizontal_mask_x <= horizontal_candidate_x;
 			horizontal_mask_bank <= horizontal_candidate_bank;
-			horizontal_mask_epoch <= horizontal_row_epoch;
-			horizontal_mask_y <= horizontal_row_y;
-			horizontal_mask_spread_mode <= halo_spread_mode;
+			horizontal_mask_epoch <= horizontal_candidate_epoch;
+			horizontal_mask_y <= horizontal_candidate_y;
+			horizontal_mask_spread_mode <= halo_spread_mode_q;
 			horizontal_mask_tap_0 <= horizontal_candidate_tap_0;
 			horizontal_mask_tap_1 <= horizontal_candidate_tap_1;
 			horizontal_mask_tap_2 <= horizontal_candidate_tap_2;
@@ -1618,9 +1632,18 @@ module vfb_halo_wide #(
 			horizontal_write_epoch <= horizontal_total_epoch;
 			horizontal_write_y <= horizontal_total_y;
 			horizontal_write_rgb <= {
-				horizontal_combined_r[14:7],
-				horizontal_combined_g[14:7],
-				horizontal_combined_b[14:7]
+				compress_filtered_energy(
+					horizontal_combined_r[14:7],
+					halo_knee_enable_q,
+					halo_knee_threshold_q),
+				compress_filtered_energy(
+					horizontal_combined_g[14:7],
+					halo_knee_enable_q,
+					halo_knee_threshold_q),
+				compress_filtered_energy(
+					horizontal_combined_b[14:7],
+					halo_knee_enable_q,
+					halo_knee_threshold_q)
 			};
 
 			horizontal_part_row_complete <=
@@ -1679,6 +1702,7 @@ module vfb_halo_wide #(
 				horizontal_mask_spread_mode);
 
 			if (vertical_blur_valid &&
+			    (coarse_width != '0) &&
 			    vertical_blur_x + 1'b1 >= coarse_width) begin
 				flush_active <= 1'b1;
 				flush_count <= 3'd4;
@@ -1694,7 +1718,7 @@ module vfb_halo_wide #(
 			end
 
 			if (horizontal_step_valid) begin
-				if (horizontal_step_x == 0) begin
+				if (horizontal_row_start) begin
 					horizontal_row_safe <= vertical_blur_safe;
 					horizontal_row_bank <=
 						write_bank[horizontal_step_epoch];
@@ -1709,7 +1733,7 @@ module vfb_halo_wide #(
 				h_history[2] <= h_history[1];
 				h_history[1] <= h_history[0];
 				h_history[0] <= horizontal_step_rgb;
-				if (horizontal_step_x == 0) begin
+				if (horizontal_row_start) begin
 					h_valid_history <=
 						{6'd0, horizontal_current_tap_valid};
 				end else begin
@@ -1726,9 +1750,8 @@ module vfb_halo_wide #(
 		end
 	end
 
-	// Full-rate bilinear reconstruction
-	// RECON_SAMPLE_*_ADVANCE defines the fixed coordinate convention between
-	// the coarse halo field and the final primary pixels.
+	// Full-resolution bilinear reconstruction.
+	// RECON_SAMPLE_*_ADVANCE aligns coarse halo samples with final pixels.
 	localparam [11:0] RECONSTRUCTION_PIPELINE_X_ADVANCE = 12'd3;
 	localparam [11:0] RECONSTRUCTION_X_ADVANCE =
 		RECONSTRUCTION_PIPELINE_X_ADVANCE +
@@ -2079,8 +2102,8 @@ module vfb_halo_wide #(
 			vertical_blend_s0_valid <= horizontal_valid;
 			vertical_blend_s1_valid <= vertical_blend_s0_valid;
 
-			// Horizontal reconstruction uses fixed-point ramps. horizontal_valid
-			// gates the only downstream use of these free-running samples.
+			// Horizontal ramps update every clock; horizontal_valid marks visible
+			// samples.
 			horizontal_latest <= {
 				interp_ramp_channel(latest_ramp_r),
 				interp_ramp_channel(latest_ramp_g),
@@ -2092,10 +2115,8 @@ module vfb_halo_wide #(
 				interp_ramp_channel(previous_ramp_b)
 			};
 
-			// Vertical reconstruction uses the delta form:
-			//   prev<<4 + (latest-prev) * w
-			// The valid bit decides whether the result can enter the visible
-			// halo stream.
+			// Vertical reconstruction uses prev<<4 + (latest-prev) * weight.
+			// Only valid results can reach the visible halo.
 			vertical_blend_s0_weight <= vertical_weight_q;
 			vertical_blend_s0_prev_r <= horizontal_previous[23:16];
 			vertical_blend_s0_prev_g <= horizontal_previous[15:8];
@@ -2128,13 +2149,12 @@ module vfb_halo_wide #(
 					vertical_blend_s0_delta_b,
 					vertical_blend_s0_weight);
 
-			// Segment setup is spread across the final four pixels of each
-			// 16-pixel span:
-			//   x+12: register the coarse row address,
-			//   x+13: read and register the row RAM outputs,
-			//   x+14: compute the next ramp start/delta,
-			//   x+15: load that prepared ramp for the following span.
-			// This separates row-RAM access from interpolation setup.
+			// Prepare the next 16-pixel span over the final four pixels:
+			//   x+12: register the coarse row address
+			//   x+13: read and register row RAM
+			//   x+14: compute the next ramp
+			//   x+15: load it for the following span
+			// This keeps the RAM read separate from interpolation setup.
 			if (reconstruction_step_q &&
 			    reconstruction_x_q[3:0] == 4'd12) begin
 				logic [COARSE_W-1:0] prefetch_address;
@@ -2145,7 +2165,8 @@ module vfb_halo_wide #(
 					segment_read_addr <= '0;
 					segment_read_in_range <= 1'b0;
 				end else if (reconstruction_x_q[11:4] < 4) begin
-					segment_read_addr <= '0;
+					segment_read_addr <= coarse_width +
+						reconstruction_x_q[COARSE_W+3:4];
 					segment_read_in_range <= 1'b1;
 				end else begin
 					last_address = coarse_width - 1'b1;

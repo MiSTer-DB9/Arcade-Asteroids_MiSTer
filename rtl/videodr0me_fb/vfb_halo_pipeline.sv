@@ -2,10 +2,10 @@
 // Delayed-primary, bloom, and broad-halo video pipeline.
 // written 2026 by Videodr0me
 //
-// Sparse raw pixels are delayed vertically in external SDRAM and horizontally
-// in a short MLAB shift register. The local bloom filter produces the
-// primary+bloom composite. In parallel, the undelayed raw primary stream feeds
-// the broad halo generator. Both paths meet only at the final saturating mix.
+// Primary pixels are delayed vertically in external SDRAM and horizontally
+// in a short MLAB shift register. The local filter adds bloom while the
+// undelayed image generates the broad halo. The two paths are combined at
+// the final saturated addition.
 // ============================================================================
 
 module vfb_halo_pipeline #(
@@ -21,8 +21,10 @@ module vfb_halo_pipeline #(
 
 	input  logic [2:0]  osd_bloom_width,
 	input  logic [9:0]  bloom_curve_gain,
+	input  logic [2:0]  halo_curve_mode,
 	input  logic [7:0]  halo_filter,
 	input  logic [1:0]  halo_spread_mode,
+	input  logic [1:0]  halo_knee_mode,
 	input  logic [11:0] active_height,
 	input  logic        color_space_amp709,
 	input  logic [2:0]  presentation_color,
@@ -55,12 +57,31 @@ module vfb_halo_pipeline #(
 	output logic        sdram_we,
 	output logic [1:0]  sdram_dqm,
 	output logic [12:0] sdram_addr,
-	output logic [1:0]  sdram_ba,
-
-	output logic        sdram_overflow,
-	output logic        sdram_underflow,
-	output logic        sdram_init_done
+	output logic [1:0]  sdram_ba
 );
+	logic [2:0] osd_bloom_width_q = 3'd0;
+	logic [9:0] bloom_curve_gain_q = 10'd64;
+	logic [2:0] halo_curve_mode_q = 3'd0;
+	logic [7:0] halo_filter_q = 8'd0;
+	logic [1:0] halo_spread_mode_q = 2'd0;
+	logic [1:0] halo_knee_mode_q = 2'd0;
+	logic       color_space_amp709_q = 1'b0;
+	logic [2:0] presentation_color_q = 3'd0;
+	logic       slot_mask_enable_q = 1'b0;
+	logic       slot_mask_rows_q = 1'b0;
+
+	always_ff @(posedge clk_sys) begin
+		osd_bloom_width_q <= osd_bloom_width;
+		bloom_curve_gain_q <= bloom_curve_gain;
+		halo_curve_mode_q <= halo_curve_mode;
+		halo_filter_q <= halo_filter;
+		halo_spread_mode_q <= halo_spread_mode;
+		halo_knee_mode_q <= halo_knee_mode;
+		color_space_amp709_q <= color_space_amp709;
+		presentation_color_q <= presentation_color;
+		slot_mask_enable_q <= slot_mask_enable;
+		slot_mask_rows_q <= slot_mask_rows;
+	end
 
 	logic [7:0] delayed_r;
 	logic [7:0] delayed_g;
@@ -70,7 +91,7 @@ module vfb_halo_pipeline #(
 	logic delayed_hblank;
 	logic delayed_vblank;
 
-	// Local reset register for the SDRAM delay subtree.
+	// Register reset at the SDRAM delay input.
 	(* preserve, dont_merge *) logic primary_line_delay_reset_q = 1'b1;
 	always_ff @(posedge clk_sys)
 		primary_line_delay_reset_q <= reset;
@@ -108,9 +129,9 @@ module vfb_halo_pipeline #(
 		.sdram_dqm(sdram_dqm),
 		.sdram_addr(sdram_addr),
 		.sdram_ba(sdram_ba),
-		.overflow(sdram_overflow),
-		.underflow(sdram_underflow),
-		.init_done(sdram_init_done)
+		.overflow(),
+		.underflow(),
+		.init_done()
 	);
 
 	(* ramstyle = "MLAB" *) logic [27:0] horizontal_delay
@@ -147,8 +168,8 @@ module vfb_halo_pipeline #(
 		.clk_sys(clk_sys),
 		.ce_pix(ce_pix),
 		.reset(reset),
-		.osd_bloom_width(osd_bloom_width),
-		.bloom_curve_gain(bloom_curve_gain),
+		.osd_bloom_width(osd_bloom_width_q),
+		.bloom_curve_gain(bloom_curve_gain_q),
 		.VGA_R_IN(filter_input[23:16]),
 		.VGA_G_IN(filter_input[15:8]),
 		.VGA_B_IN(filter_input[7:0]),
@@ -171,19 +192,19 @@ module vfb_halo_pipeline #(
 	logic wide_halo_valid;
 
 	vfb_halo_wide #(
-		.MAX_WIDTH(MAX_WIDTH)
+		.MAX_WIDTH(MAX_WIDTH),
+		.RECONSTRUCTION_DELAY_LINES(SDR_DELAY_LINES)
 	) wide_halo (
 		.clk_sys(clk_sys),
 		.reset(reset),
 		.ce_pix(ce_pix),
-		.bloom_curve_gain(bloom_curve_gain),
-		.halo_spread_mode(halo_spread_mode),
+		.halo_curve_mode(halo_curve_mode_q),
+		.halo_spread_mode(halo_spread_mode_q),
+		.halo_knee_mode(halo_knee_mode_q),
 		.active_height(active_height),
 		.VGA_R_IN(VGA_R_IN),
 		.VGA_G_IN(VGA_G_IN),
 		.VGA_B_IN(VGA_B_IN),
-		.VGA_HS_IN(VGA_HS_IN),
-		.VGA_VS_IN(VGA_VS_IN),
 		.VGA_HBLANK_IN(VGA_HBLANK_IN),
 		.VGA_VBLANK_IN(VGA_VBLANK_IN),
 		.HALO_R_OUT(wide_halo_r),
@@ -264,9 +285,10 @@ module vfb_halo_pipeline #(
 	logic mix_vs;
 	logic mix_hblank;
 	logic mix_vblank;
-	logic [7:0] present_r;
-	logic [7:0] present_g;
-	logic [7:0] present_b;
+	logic [8:0] present_r;
+	logic [8:0] present_g;
+	logic [8:0] present_b;
+	logic present_source_is_255;
 	logic present_hs;
 	logic present_vs;
 	logic present_hblank;
@@ -276,13 +298,14 @@ module vfb_halo_pipeline #(
 		.clk_sys(clk_sys),
 		.reset(reset),
 		.ce_pix(ce_pix),
-		.color_space_amp709(color_space_amp709),
-		.presentation_color(presentation_color),
-		.slot_mask_enable(slot_mask_enable),
-		.slot_mask_rows(slot_mask_rows),
+		.color_space_amp709(color_space_amp709_q),
+		.presentation_color(presentation_color_q),
+		.slot_mask_enable(slot_mask_enable_q),
+		.slot_mask_rows(slot_mask_rows_q),
 		.VGA_R_IN(present_r),
 		.VGA_G_IN(present_g),
 		.VGA_B_IN(present_b),
+		.source_is_255(present_source_is_255),
 		.VGA_HS_IN(present_hs),
 		.VGA_VS_IN(present_vs),
 		.VGA_HBLANK_IN(present_hblank),
@@ -308,9 +331,10 @@ module vfb_halo_pipeline #(
 			mix_vs <= 1'b1;
 			mix_hblank <= 1'b1;
 			mix_vblank <= 1'b1;
-			present_r <= 8'd0;
-			present_g <= 8'd0;
-			present_b <= 8'd0;
+			present_r <= 9'd0;
+			present_g <= 9'd0;
+			present_b <= 9'd0;
+			present_source_is_255 <= 1'b0;
 			present_hs <= 1'b1;
 			present_vs <= 1'b1;
 			present_hblank <= 1'b1;
@@ -325,13 +349,18 @@ module vfb_halo_pipeline #(
 			mixed_b = {1'b0, mix_composite_b} + {1'b0, mix_halo_b};
 
 			if (mix_hblank || mix_vblank) begin
-				present_r <= 8'd0;
-				present_g <= 8'd0;
-				present_b <= 8'd0;
+				present_r <= 9'd0;
+				present_g <= 9'd0;
+				present_b <= 9'd0;
+				present_source_is_255 <= 1'b0;
 			end else begin
-				present_r <= mixed_r[8] ? 8'hff : mixed_r[7:0];
-				present_g <= mixed_g[8] ? 8'hff : mixed_g[7:0];
-				present_b <= mixed_b[8] ? 8'hff : mixed_b[7:0];
+				present_r <= mixed_r;
+				present_g <= mixed_g;
+				present_b <= mixed_b;
+				present_source_is_255 <=
+					(mix_composite_r == 8'hff) ||
+					(mix_composite_g == 8'hff) ||
+					(mix_composite_b == 8'hff);
 			end
 			present_hs <= mix_hs;
 			present_vs <= mix_vs;
@@ -342,11 +371,11 @@ module vfb_halo_pipeline #(
 			mix_composite_g <= composite_g;
 			mix_composite_b <= composite_b;
 			mix_halo_r <= halo_contribution(
-				wide_halo_r, wide_halo_valid, halo_filter);
+				wide_halo_r, wide_halo_valid, halo_filter_q);
 			mix_halo_g <= halo_contribution(
-				wide_halo_g, wide_halo_valid, halo_filter);
+				wide_halo_g, wide_halo_valid, halo_filter_q);
 			mix_halo_b <= halo_contribution(
-				wide_halo_b, wide_halo_valid, halo_filter);
+				wide_halo_b, wide_halo_valid, halo_filter_q);
 			mix_hs <= composite_hs;
 			mix_vs <= composite_vs;
 			mix_hblank <= composite_hblank;

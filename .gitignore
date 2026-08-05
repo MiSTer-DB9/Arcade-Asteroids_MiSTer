@@ -36,6 +36,8 @@ c5_pin_model_dump.txt
 *.bsf
 *~
 *.xml
+*.pyc
+__pycache__/
 *_netlist
 *.cdf
 **/.DS_Store
@@ -44,3 +46,5 @@ c5_pin_model_dump.txt
 /cfg/
 /snap/
 /tcl/
+/artwork/generated/
+/MRAs/

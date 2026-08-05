@@ -187,7 +187,7 @@ module asteroids_core
 	                      : (cpu_address_masked[14:3] == 12'h400);
 	assign input_1_select = (cpu_address_masked[14:3] == 12'h480);
 	assign dip_select = (cpu_address_masked[14:2] == 13'h0a00);
-	// Lunar fuel uses P8 switches 5, 7, and 8 around coinage on switch 6.
+	// Match Lunar Lander's P8 order: fuel on switches 5, 7, and 8; coinage on switch 6.
 	assign board_dsw_1 = game_is_lander
 	                   ? {dsw_1[6:4], dsw_1[7], dsw_1[3:0]}
 	                   : dsw_1;
@@ -213,7 +213,7 @@ module asteroids_core
 	assign program_rom_address = (game_is_deluxe || game_is_lander)
 	                           ? cpu_address_masked[12:0]
 	                           : cpu_address_masked[12:0] - 13'h0800;
-	// Downloads are stored at their actual DVG offsets from CPU $4000.
+	// Map each packed vector ROM image to its address offset from CPU $4000.
 	assign vector_rom_write_address = game_is_asteroids
 	                                ? rom_address[12:0] - 13'h0800
 	                                : rom_address[12:0] + 13'h0800;

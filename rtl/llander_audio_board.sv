@@ -87,7 +87,7 @@ module llander_audio_board
 		input logic signed [23:0] value
 	);
 		begin
-			// 1.65625 approximates the schematic's 1000/600 gain ratio.
+			// Shift-add approximation of the schematic's 1000:600 gain.
 			explosion_gain = value + (value >>> 1) +
 			                 (value >>> 3) + (value >>> 5);
 		end

@@ -16,8 +16,8 @@
 //        [3:0]=count-1. Examples:
 //        mask 110, spill 49 => RGB=(232,232,49)
 //        mask 001, spill 129 => RGB=(129,129,232)
-//   0xF: black run, [11:0]=count-1. An odd SDR packer filler is 0xF000.
-//        The line descriptor suppresses filler words in normal operation.
+//   0xF: black run, [11:0]=count-1. Odd-length lines are padded with 0xF000;
+//        the descriptor excludes it.
 //
 // The previous decoded RGB is reset to black at each line boundary.
 // The encoder therefore terminates every line independently and emits token_eol
@@ -42,9 +42,16 @@ module vfb_rle_encoder (
 
 	localparam integer RUN_FIFO_DEPTH = 16;
 	localparam integer RUN_FIFO_AW = 4;
-	localparam integer RUN_FIFO_WIDTH = 1 + 13 + 24;
-	localparam logic [RUN_FIFO_AW-1:0] RUN_FIFO_LAST = {RUN_FIFO_AW{1'b1}};
+	localparam integer RUN_DESCRIPTOR_WIDTH = 2 + 24;
+	localparam integer RUN_FIFO_WIDTH = 1 + 13 + RUN_DESCRIPTOR_WIDTH;
 	localparam logic [7:0] SPILL_MAIN_CEIL = 8'd232;
+
+	typedef enum logic [1:0] {
+		RUN_BLACK,
+		RUN_INTENSITY,
+		RUN_SPILL,
+		RUN_LITERAL
+	} run_kind_t;
 
 	typedef enum logic [2:0] {
 		EMIT_IDLE,
@@ -58,20 +65,24 @@ module vfb_rle_encoder (
 
 	logic        run_valid;
 	logic [23:0] run_rgb;
+	logic [RUN_DESCRIPTOR_WIDTH-1:0] run_descriptor;
 	logic [12:0] run_count;
 	logic        input_pixel_valid;
 	logic [23:0] input_rgb;
 	logic        input_line_end;
 
-	// Keep this 16-entry queue in local registers. A pending register separates
-	// run detection from the queue write mux while preserving one run per clock.
+	// Registered run state decouples detection from output.
 	(* ramstyle = "logic" *) logic [RUN_FIFO_WIDTH-1:0] run_fifo_entry [0:RUN_FIFO_DEPTH-1];
 	logic [RUN_FIFO_AW:0] run_fifo_used;
+	logic [RUN_FIFO_AW-1:0] run_fifo_rd_ptr;
+	logic [RUN_FIFO_AW-1:0] run_fifo_wr_ptr;
 	logic                         pending_valid;
 	logic [RUN_FIFO_WIDTH-1:0]    pending_entry;
+	logic                         prefetch_valid;
+	logic [RUN_FIFO_WIDTH-1:0]    prefetch_entry;
 
 	emit_state_t emit_state;
-	logic [23:0] emit_rgb;
+	logic [23:0] emit_payload;
 	logic [12:0] emit_count;
 	logic [12:0] emit_repeat_remaining;
 	logic        emit_eol;
@@ -182,6 +193,42 @@ module vfb_rle_encoder (
 		end
 	endfunction
 
+	function automatic [7:0] masked_intensity(input logic [23:0] rgb);
+		begin
+			if (rgb[23:16] != 8'd0)
+				masked_intensity = rgb[23:16];
+			else if (rgb[15:8] != 8'd0)
+				masked_intensity = rgb[15:8];
+			else
+				masked_intensity = rgb[7:0];
+		end
+	endfunction
+
+	function automatic logic [RUN_DESCRIPTOR_WIDTH-1:0] classify_run(
+		input logic [23:0] rgb
+	);
+		begin
+			if (is_black(rgb))
+				classify_run = {RUN_BLACK, 24'd0};
+			else if (is_masked_intensity(rgb))
+				classify_run = {
+					RUN_INTENSITY,
+					13'd0,
+					rgb_mask(rgb),
+					masked_intensity(rgb)
+				};
+			else if (is_main_ceiling_spill(rgb))
+				classify_run = {
+					RUN_SPILL,
+					13'd0,
+					spill_main_mask(rgb),
+					spill_intensity(rgb)
+				};
+			else
+				classify_run = {RUN_LITERAL, rgb};
+		end
+	endfunction
+
 	function automatic [11:0] count_m1_12(input logic [12:0] count);
 		count_m1_12 = count[11:0] - 12'd1;
 	endfunction
@@ -209,17 +256,12 @@ module vfb_rle_encoder (
 
 	wire run_fifo_empty = (run_fifo_used == 0);
 	wire run_fifo_full = (run_fifo_used == RUN_FIFO_DEPTH);
-	wire run_fifo_pop = emit_available_for_new && !run_fifo_empty;
-	wire [RUN_FIFO_WIDTH-1:0] run_fifo_head = run_fifo_entry[0];
-	wire        run_fifo_head_eol   = run_fifo_head[37];
-	wire [12:0] run_fifo_head_count = run_fifo_head[36:24];
-	wire [23:0] run_fifo_head_rgb   = run_fifo_head[23:0];
-	wire [RUN_FIFO_AW-1:0] run_fifo_used_low =
-		run_fifo_used[RUN_FIFO_AW-1:0];
-	wire [RUN_FIFO_AW-1:0] run_fifo_tail_after_pop =
-		run_fifo_used_low - {{(RUN_FIFO_AW-1){1'b0}}, 1'b1};
-	wire [RUN_FIFO_AW-1:0] run_fifo_push_idx =
-		run_fifo_pop ? run_fifo_tail_after_pop : run_fifo_used_low;
+	wire run_fifo_pop = !prefetch_valid && !run_fifo_empty;
+	wire [RUN_FIFO_WIDTH-1:0] run_fifo_head =
+		run_fifo_entry[run_fifo_rd_ptr];
+	wire start_prefetch = emit_available_for_new && prefetch_valid;
+	wire start_fifo_head =
+		emit_available_for_new && !prefetch_valid && run_fifo_pop;
 	wire run_fifo_can_push = !run_fifo_full || run_fifo_pop;
 	wire run_fifo_push = pending_valid && run_fifo_can_push;
 	wire pixel_extends_run =
@@ -231,43 +273,39 @@ module vfb_rle_encoder (
 	wire [RUN_FIFO_WIDTH-1:0] completed_run_entry = {
 		line_finishes_run,
 		run_count,
-		run_rgb
+		run_descriptor
 	};
 	wire run_close_request =
 		pixel_finishes_run || line_finishes_run;
 	wire pending_ready = !pending_valid || run_fifo_can_push;
 	wire run_close_accept = run_close_request && pending_ready;
 
-	task automatic start_emit(
-		input logic [23:0] rgb,
-		input logic [12:0] count,
-		input logic eol
-	);
-		begin
-			emit_rgb <= rgb;
-			emit_count <= count;
-			emit_eol <= eol;
-			emit_literal_count_m1 <=
-				count_m1_4((count > 13'd16) ? 5'd1 :
-					{1'b0, count[3:0]});
-			if (is_black(rgb)) begin
-				emit_state <= EMIT_BLACK;
-				emit_repeat_remaining <= count;
-			end else if (is_masked_intensity(rgb)) begin
-				emit_state <= EMIT_INTENSITY;
-				emit_repeat_remaining <=
-					count - ((count > 13'd16) ? 13'd1 : count);
-			end else if (is_main_ceiling_spill(rgb)) begin
-				emit_state <= EMIT_SPILL;
-				emit_repeat_remaining <=
-					count - ((count > 13'd16) ? 13'd1 : count);
-			end else begin
-				emit_state <= EMIT_LITERAL0;
-				emit_repeat_remaining <=
-					count - ((count > 13'd16) ? 13'd1 : count);
+	wire start_emit = start_prefetch || start_fifo_head;
+	wire [RUN_FIFO_WIDTH-1:0] start_entry =
+		prefetch_valid ? prefetch_entry : run_fifo_head;
+	wire        start_eol = start_entry[39];
+	wire [12:0] start_count = start_entry[38:26];
+	wire [1:0]  start_kind = start_entry[25:24];
+	wire [23:0] start_payload = start_entry[23:0];
+	wire [4:0] start_literal_count =
+		(start_count > 13'd16) ? 5'd1 : {1'b0, start_count[3:0]};
+
+	emit_state_t start_state;
+	logic [12:0] start_repeat_remaining;
+	always_comb begin
+		start_state = EMIT_LITERAL0;
+		start_repeat_remaining =
+			(start_count > 13'd16) ? start_count - 13'd1 : 13'd0;
+		case (start_kind)
+			RUN_BLACK: begin
+				start_state = EMIT_BLACK;
+				start_repeat_remaining = start_count;
 			end
-		end
-	endtask
+			RUN_INTENSITY: start_state = EMIT_INTENSITY;
+			RUN_SPILL: start_state = EMIT_SPILL;
+			default: start_state = EMIT_LITERAL0;
+		endcase
+	end
 
 	always_ff @(posedge clk_sys) begin
 		if (reset) begin
@@ -276,18 +314,20 @@ module vfb_rle_encoder (
 			token_eol <= 1'b0;
 			run_valid <= 1'b0;
 			run_rgb <= 24'd0;
+			run_descriptor <= '0;
 			run_count <= 13'd0;
 			input_pixel_valid <= 1'b0;
 			input_rgb <= 24'd0;
 			input_line_end <= 1'b0;
 			run_fifo_used <= '0;
+			run_fifo_rd_ptr <= '0;
+			run_fifo_wr_ptr <= '0;
 			pending_valid <= 1'b0;
 			pending_entry <= '0;
-			for (int i=0; i<RUN_FIFO_DEPTH; i++) begin
-				run_fifo_entry[i] <= '0;
-			end
+			prefetch_valid <= 1'b0;
+			prefetch_entry <= '0;
 			emit_state <= EMIT_IDLE;
-			emit_rgb <= 24'd0;
+			emit_payload <= 24'd0;
 			emit_count <= 13'd0;
 			emit_repeat_remaining <= 13'd0;
 			emit_eol <= 1'b0;
@@ -323,10 +363,8 @@ module vfb_rle_encoder (
 					EMIT_INTENSITY: begin
 						token_data <= {
 							1'b0,
-							rgb_mask(emit_rgb),
-							emit_rgb[23:16] != 0 ? emit_rgb[23:16] :
-							emit_rgb[15:8]  != 0 ? emit_rgb[15:8] :
-							                         emit_rgb[7:0],
+							emit_payload[10:8],
+							emit_payload[7:0],
 							count_m1_4(first_count)
 						};
 						token_eol <=
@@ -341,8 +379,8 @@ module vfb_rle_encoder (
 					EMIT_SPILL: begin
 						token_data <= {
 							1'b1,
-							spill_main_mask(emit_rgb),
-							spill_intensity(emit_rgb),
+							emit_payload[10:8],
+							emit_payload[7:0],
 							count_m1_4(first_count)
 						};
 						token_eol <=
@@ -357,7 +395,7 @@ module vfb_rle_encoder (
 					EMIT_LITERAL0: begin
 						token_data <= {
 							4'h0,
-							emit_rgb[23:16],
+							emit_payload[23:16],
 							emit_literal_count_m1
 						};
 						token_eol <= 1'b0;
@@ -365,7 +403,7 @@ module vfb_rle_encoder (
 					end
 
 					EMIT_LITERAL1: begin
-						token_data <= emit_rgb[15:0];
+						token_data <= emit_payload[15:0];
 						token_eol <=
 							(emit_repeat_remaining == 13'd0) &&
 							emit_eol;
@@ -400,22 +438,29 @@ module vfb_rle_encoder (
 				endcase
 			end
 
+			if (start_emit) begin
+				emit_payload <= start_payload;
+				emit_count <= start_count;
+				emit_eol <= start_eol;
+				emit_literal_count_m1 <=
+					count_m1_4(start_literal_count);
+				emit_state <= start_state;
+				emit_repeat_remaining <= start_repeat_remaining;
+			end
+
+			if (start_prefetch)
+				prefetch_valid <= 1'b0;
+
 			if (run_fifo_pop) begin
-				start_emit(
-					run_fifo_head_rgb,
-					run_fifo_head_count,
-					run_fifo_head_eol
-				);
-				for (int i=0; i<RUN_FIFO_DEPTH-1; i++) begin
-					if (run_fifo_push && (run_fifo_push_idx == i[RUN_FIFO_AW-1:0]))
-						run_fifo_entry[i] <= pending_entry;
-					else
-						run_fifo_entry[i] <= run_fifo_entry[i+1];
+				if (!start_fifo_head) begin
+					prefetch_entry <= run_fifo_head;
+					prefetch_valid <= 1'b1;
 				end
-				if (run_fifo_push && (run_fifo_push_idx == RUN_FIFO_LAST))
-					run_fifo_entry[RUN_FIFO_DEPTH-1] <= pending_entry;
-			end else if (run_fifo_push) begin
-				run_fifo_entry[run_fifo_push_idx] <= pending_entry;
+				run_fifo_rd_ptr <= run_fifo_rd_ptr + 1'b1;
+			end
+			if (run_fifo_push) begin
+				run_fifo_entry[run_fifo_wr_ptr] <= pending_entry;
+				run_fifo_wr_ptr <= run_fifo_wr_ptr + 1'b1;
 			end
 
 			case ({run_fifo_push, run_fifo_pop})
@@ -446,11 +491,13 @@ module vfb_rle_encoder (
 				if (!run_valid) begin
 					run_valid <= 1'b1;
 					run_rgb <= input_rgb;
+					run_descriptor <= classify_run(input_rgb);
 					run_count <= 13'd1;
 				end else if (pixel_extends_run) begin
 					run_count <= run_count + 13'd1;
 				end else begin
 					run_rgb <= input_rgb;
+					run_descriptor <= classify_run(input_rgb);
 					run_count <= 13'd1;
 					run_valid <= 1'b1;
 				end
