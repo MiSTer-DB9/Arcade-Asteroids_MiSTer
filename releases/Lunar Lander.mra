@@ -15,7 +15,7 @@
 	<parent>llander</parent>
 	<mameversion>0287</mameversion>
 	<rbf>Asteroids</rbf>
-	<about>Atari Lunar Lander with a hardware-level DVG, analog thrust control, discrete audio, and high-resolution vector framebuffer.</about>
+	<about author="Videodr0me" webpage="https://github.com/MiSTer-devel/Arcade-Asteroids_MiSTer">Atari Lunar Lander with a hardware-level DVG, analog thrust control, discrete audio, and high-resolution vector framebuffer.</about>
 
 	<rotation>horizontal</rotation>
 	<flip>yes</flip>
@@ -24,7 +24,7 @@
 	<joystick>2-way horizontal</joystick>
 	<special_controls>throttle</special_controls>
 	<num_buttons>2</num_buttons>
-	<buttons default="A,B,-,Start,Select,R,L,Y" names="Digital Thrust,Abort Thrust,-,Start,Select Mission,Coin Left,Pause,Coin Right"></buttons>
+	<buttons default="A,B,Start,Select,R,L,Y" names="Digital Thrust,Abort Thrust,-,Start,Select Mission,Coin Left,Pause,Coin Right"></buttons>
 
 	<switches default="40,00">
 		<dip bits="0,1" ids="x1,x4,x5,x6" name="Right Coin"></dip>
@@ -51,5 +51,5 @@
 		<part crc="97953db8" name="034602-01.c8"></part>
 	</rom>
 
-	<mratimestamp>20260804000000</mratimestamp>
+	<mratimestamp>20260810000000</mratimestamp>
 </misterromdescription>

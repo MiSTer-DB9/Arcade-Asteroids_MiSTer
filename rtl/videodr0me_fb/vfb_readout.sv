@@ -159,7 +159,7 @@ module vfb_readout #(
 
 	logic [7:0] fetch_tile_x;
 	logic [7:0] target_fetch_y;
-	logic [14:0] fetch_tile_addr;
+	(* preserve, dont_merge *) logic [14:0] fetch_tile_addr;
 	logic       row0_prefetch_active;
 
 	logic [7:0] run_start_x;

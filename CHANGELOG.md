@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## CRT 15 kHz Output Update [20260810]
+
+### Features
+
+- **Native 480i Output**: Adds 720x480 interlaced output for 15 kHz CRTs and
+  selectable 240p output.
+- **Expanded CRT Resolution**: Increases 240p from 640x240 to 720x240 and
+  480p/480i from 640x480 to 720x480.
+- **CRT-Compatible Timings**: Adds 59.94 Hz timing with a CRT-friendly active
+  width for 240p, 480i, and 480p.
+- **CRT Vertical Position**: Moves 240p, 480p, and 480i output vertically.
+
+### Required CRT Setup
+
+> **Required for VGA 480i output and best image quality:** Place these entries in
+> an `[Asteroids]` section at the end of `MiSTer.ini`.
+> ```ini
+> [Asteroids]
+> video_mode=720,240,60
+> vga_scaler=0
+> forced_scandoubler=0
+> ```
+> For a 31 kHz CRT, use `video_mode=720,480,60`.
+> For Direct Video, `direct_video=1` is sufficient if not already set.
+
+Thanks to **akeley**, **biobern**, **Chris23235**, **deadwingmisterfpga**,
+**Higgy**, **Malento**, **MiSTerTea**, and **thorr** from the MiSTer FPGA Forum
+and to **david92**, **leosync04**, **Matti**, **MikeS**, **pixel_sam**,
+**Stefan**, **tim_15k8**, and **dr_waffles** for testing the new CRT modes on
+their displays.
+
 ## Follow-up Update [20260804]
 
 ### Features
@@ -11,7 +42,8 @@ All notable changes to this project will be documented in this file.
   half-silvered mirror. Two supplied MRAs reproduce the known green and orange
   artwork variants at 240p, 480p, 720p, and 1080p.
 - **Custom Artwork Builder**: The included Python tool validates and compresses
-  resolution-specific indexed artwork and creates a new MRA containing it.
+  resolution-specific indexed artwork and creates a new MRA containing it for
+  any of the three games. Fixed profiles use matching artwork automatically.
 - **Expanded CRT Timing Support**: Adds dedicated 240p timing and improves
   native 15 kHz and 31 kHz output compatibility.
 - **Spinner and Mouse Rotation**: All three games support reversible spinner
@@ -34,9 +66,8 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation and Integration
 
-- **CRT Output Guide**: Documents core-native and MiSTer-scaled analog output,
-  15 kHz and 31 kHz modelines, sync choices, and the required renderer-height
-  ranges.
+- **CRT Output Guide**: Documents the required MiSTer.ini settings, native
+  15 kHz and 31 kHz output, vertical positioning, and sync alternatives.
 - **Artwork Documentation**: Documents how to use the supplied compression
   tool, the required image dimensions, palette depths, and generated files.
 

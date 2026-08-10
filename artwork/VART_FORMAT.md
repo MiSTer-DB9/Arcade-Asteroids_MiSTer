@@ -78,7 +78,7 @@ first row cannot contain a previous-row token.
 | --- | ---: |
 | 1080p | 1360 x 1080 |
 | 720p at 60 or 120 Hz | 916 x 720 |
-| 480p | 640 x 480 |
-| 240p | 640 x 240 |
+| 480p / 480i | 720 x 480 |
+| 240p | 720 x 240 |
 
 The renderer selects a background plane only on an exact dimension match.

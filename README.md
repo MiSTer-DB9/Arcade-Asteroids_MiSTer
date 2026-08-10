@@ -31,7 +31,7 @@ please support my work and future updates:
 | **Audio** | Discrete analog sound in Asteroids and Lunar Lander; POKEY with discrete effects in Asteroids Deluxe | Schematic-derived audio, filtering, mixing, and cabinet response for all three games |
 | **Mission Indicators** *(Lunar only)* | Four cabinet LEDs identify the selected mission | On-screen mission information shows the selected mission and its flight conditions |
 | **Persistent Storage** *(Deluxe only)* | 64-byte Atari ER2055 EAROM | ER2055-compatible EAROM with MiSTer NVRAM persistence |
-| **Display** | Monochrome XY vector monitor | Doubled-density Vector Doubler (shadow DVG) and high-resolution raster renderer for detailed Full HD output, with bloom, halo, phosphor decay, and selectable vector colors |
+| **Display** | Monochrome XY vector monitor | Doubled-density Vector Doubler (shadow DVG) and high-resolution raster renderer for detailed Full HD output, with bloom, halo, phosphor decay, and selectable vector colors. Best in 1080p with HDR = 1 set.|
 | **Cabinet Backdrop** *(Deluxe upright only)* | Blacklight-illuminated 3D cardboard backdrop and raised inserts, viewed through a half-silvered mirror | Resolution-specific indexed artwork blended behind the vector display, with green and orange cabinet variants |
 | **Controls** | Digital ship controls in Asteroids/Deluxe; rotation, analog thrust lever, Abort, and mission selection in Lunar Lander | MiSTer joystick, analog controller, keyboard, spinner, mouse, and cabinet input mapping |
 
@@ -140,23 +140,25 @@ and DIP switches are configured correctly for each game.
 Two Asteroids Deluxe MRAs are supplied for the Rev 3 ROM set:
 `Asteroids Deluxe (v3 green).mra` and `Asteroids Deluxe (v3 orange).mra`.
 They reproduce the two known cabinet backdrop variants and contain
-resolution-specific indexed artwork for 240p, 480p, 720p, and 1080p. The
-Background controls are unavailable when the loaded MRA does not provide a
-valid artwork package.
+resolution-specific indexed artwork for 240p, 480p, 720p, and 1080p. Fixed
+profiles display matching artwork automatically. In Custom 1 and Custom 2, the
+Background controls are disabled when the loaded MRA does not provide a valid
+artwork plane for the current resolution.
 
-### Custom Asteroids Deluxe Artwork
+### Custom Artwork
 
 The artwork builder in the `artwork` directory can validate and compress a
-custom backdrop, then inject it into a new Asteroids Deluxe MRA. It requires
-Python 3 and Pillow (`pip install Pillow`). Supply exactly one indexed PNG for
-each supported output resolution:
+custom backdrop, then add it to a new copy of an Asteroids, Asteroids Deluxe,
+or Lunar Lander MRA. It requires Python 3 and Pillow (`pip install Pillow`).
+For complete resolution coverage, supply one indexed PNG at each size below.
+Any MRA may contain a subset; artwork is shown only at the included resolutions.
 
-| Core Mode | Required PNG Size |
+| Core Mode | PNG Size |
 |---|---|
 | **1080p** | 1360x1080 |
 | **720p** | 916x720 |
-| **480p** | 640x480 |
-| **240p** | 640x240 |
+| **480p / 480i** | 720x480 |
+| **240p** | 720x240 |
 
 Artwork is screen-fixed and does not follow the core's vector-orientation
 setting. This makes the tool useful for vertical-monitor installations: create
@@ -176,9 +178,12 @@ python artwork/build_artwork.py `
   "releases/Asteroids Deluxe (v3 green).mra" `
   "my_art/backdrop_1360x1080.png" `
   "my_art/backdrop_916x720.png" `
-  "my_art/backdrop_640x480.png" `
-  "my_art/backdrop_640x240.png"
+  "my_art/backdrop_720x480.png" `
+  "my_art/backdrop_720x240.png"
 ```
+
+The current 720-wide plane set is selected by default. Use `--format legacy`
+with 640x480 and 640x240 planes when preparing artwork for an older core build.
 
 The source MRA is never modified. The ready-to-use result is written beside it
 with an `_art` suffix, for example
@@ -203,25 +208,24 @@ MRA.
 
 ## Recommended MiSTer Video Settings
 
-The renderer supports 240p, 480p, 720p, and 1080p output. **1080p is
-recommended** for the highest vector detail. Compatible 720p displays can use
+The renderer supports 240p, 480i, 480p, 720p, and 1080p output. **1080p is
+recommended** with **hdr=1** set for the highest vector detail and high dynamic range. Compatible 720p displays can additionally use
 the optional 120Hz mode.
 
 Asteroids and Asteroids Deluxe support Atari's original 61.52Hz frame cadence.
 If your display cannot synchronize reliably at 61.52Hz, return to 60Hz by
-turning **61.52Hz (Authentic)** off, or set `vsync_adjust=0` in `mister.ini`.
+turning **61.52Hz (Authentic)** off.
 
 For high-resolution flat-panel output, add the following settings under the
-exact `[Asteroids]` header in `mister.ini`. MiSTer's scaler filters and shadow
+exact `[Asteroids]` header at the end of `mister.ini`. MiSTer's scaler filters and shadow
 mask are disabled so they do not alter the core's CRT-effects output.
 
 ```ini
 [Asteroids]
-video_mode=8  ; 8 = 1080p
-vsync_adjust=1 ; Recommended for best frame cadence and compatibility. Try 2 for even lower latency
+video_mode=8   ; 8 = 1080p 0 = 720p
+hdr=1          ; highly recommended
+vsync_adjust=1 ; (or higher) required for authentic frame cadence and 120Hz mode
 vscale_mode=0
-hdmi_limited=0
-hdr=1
 vfilter_default=
 vfilter_vertical_default=
 vfilter_scanlines_default=
@@ -232,52 +236,56 @@ shmask_mode_default=0
 The empty filter entries override filters inherited from the global
 `[MiSTer]` section.
 
-### Direct Video and CRT Output
+### CRT and Direct Video Output
 
-When Direct Video is active, use **Direct Video Scan Rate** under **Video Timing
-& Geometry** to select 15 kHz (240p) or 31 kHz (480p) output.
+#### CRT Output
 
-Without Direct Video, select a `video_mode` with 479 active lines or fewer. The
-low-line mode is required for the core to select its 240p renderer. With
-`vga_scaler=0`, the analog VGA port uses the core's native 240p timing; with
-`vga_scaler=1`, it uses MiSTer's scaler timing as defined by `video_mode` or a
-manual modeline. Start with `640,240,60`. If the CRT does not lock, try
-`640,256,60` or a monitor-specific manual modeline.
+> **Required for CRT output:** Before loading the core, set
+> `video_mode=720,240,60`, `vga_scaler=0`, and `forced_scandoubler=0`.
+>
+> Otherwise, the VGA output may use an out-of-range HD timing. These settings
+> also ensure the best image quality.
 
 ```ini
 [Asteroids]
-video_mode=640,240,60 ; For 15 kHz, vertical resolution must be 479 lines or fewer
-vga_scaler=0          ; 0 = core-native 240p timing; 1 = MiSTer modeline timing
-forced_scandoubler=0  ; Required for 15 kHz output
-vga_mode=rgb          ; Use RGB unless the display requires another signal format
-composite_sync=1      ; 1 = combined RGBS sync; 0 = separate RGBHV sync
-vsync_adjust=0        ; 0 = modeline refresh; try 1 for core-matched refresh
-vscale_mode=0         ; Experiment to find the best fit for the CRT
-hdmi_limited=0
-vfilter_default=
-vfilter_vertical_default=
-vfilter_scanlines_default=
-shmask_default=
-shmask_mode_default=0
+video_mode=720,240,60
+vga_scaler=0
+forced_scandoubler=0
 ```
 
-If neither the core-native timing nor a fixed MiSTer modeline synchronizes
-reliably, `vga_scaler=1` with `vsync_adjust=1` is another option. MiSTer keeps
-the selected modeline's resolution and porch structure while adjusting its
-pixel clock to match the core's refresh rate.
+Place these entries in an `[Asteroids]` section at the end of `MiSTer.ini`.
+Later entries take priority over earlier ones, ensuring that these core-specific
+settings override global settings.
 
-For RGBS, SCART, and most external-sync CRT connections, use
-`composite_sync=1`; MiSTer places combined sync on the VGA HSync pin. Use
-`composite_sync=0` only when the monitor expects separate HSync and VSync.
-Modeline flags such as `-hsync,-vsync` select electrical sync polarity rather
-than scan rate; negative sync is a common 240p starting point, but the monitor's
-requirements take precedence. Use `vga_mode=ypbpr` for component video and
-`vga_sog=1` only for equipment that explicitly requires sync on green.
+For a 31 kHz CRT, change the mode line to `video_mode=720,480,60`.
 
-The same choices apply to 31/32 kHz CRT monitors. Use a modeline with at least
-480 but fewer than 720 active lines so the core selects its 480p renderer;
-`vga_scaler=0` then uses the core's native 480p timing, while `vga_scaler=1`
-uses the MiSTer modeline timing.
+The following options are available under **Video Timing & Geometry**:
+
+- **61.52Hz (Authentic)** follows the original Asteroids and Asteroids Deluxe
+  frame cadence. Turn it off if your CRT cannot synchronize reliably.
+- **15 kHz Format** selects 480i or 240p, with 480i used by default. At 31 kHz,
+  the core uses 480p and hides this option.
+- **CRT Vertical Position** moves the picture vertically. Positive values move
+  it down and negative values move it up.
+
+#### Direct Video
+
+For Direct Video users, setup is simpler: use `direct_video=1` if you have not
+already. Under **Video Timing & Geometry**, **Direct Video Scan Rate** selects
+15 kHz or 31 kHz output.
+
+#### Alternatives if Sync Fails
+
+These alternatives are not recommended. Using `vga_scaler=1` greatly reduces
+image quality and should only be considered if the native output will not
+synchronize.
+
+With `vga_scaler=1`, MiSTer's scaler drives the VGA output using the selected
+`video_mode` or manual modeline. `vsync_adjust=0` retains that modeline's
+refresh rate; `1` or `2` adjusts its pixel clock to follow the core.
+
+Keep the usual `vga_mode`, `composite_sync`, and `vga_sog` settings required by
+your CRT connection.
 
 ---
 
@@ -288,8 +296,8 @@ uses the MiSTer modeline timing.
 | Option | Description |
 |---|---|
 | **Profile** | Selects five fixed presets, two independent custom slots, or the effects-filter bypass path. |
-| **Background** | Blends the packaged Asteroids Deluxe artwork with the completed CRT-effects output. |
-| **Background Blend** | Sets artwork strength from 31.3% (`-4`) to 57.8% (`+3`); `0` uses the 40.6% default and `+2` uses 50%.
+| **Background** | Blends matching MRA artwork with the completed CRT-effects output. |
+| **Background Blend** | Sets artwork strength from 31.3% (`-4`) to 57.8% (`+3`); `0` uses the 40.6% default and `+2` uses 50%. |
 | **Inter-Frame Decay** | Carries fading vector energy across completed frames. |
 | **Intra-Frame Decay** | Uses each pixel's recorded draw order to vary brightness within one vector frame. |
 
@@ -308,7 +316,9 @@ during one redraw. Strongly combining both is primarily a stylized effect.
 | **Buffer Mode** | Selects EOF + VBL, VBL-only, or EOF-only frame presentation. |
 | **120Hz (720p only)** | Enables 120Hz output when the active mode is 720p. |
 | **61.52Hz (Authentic)** | Uses Atari's original Asteroids and Asteroids Deluxe frame cadence. Turn it off for 60Hz-compatible output. |
-| **Direct Video Scan Rate** | Selects 15 kHz (240p) or 31 kHz (480p) while Direct Video is active. |
+| **Direct Video Scan Rate** | Selects the 15 kHz or 31 kHz output bracket while Direct Video is active. |
+| **15 kHz Format** | Selects 480i or 240p when the core is running in the 15 kHz bracket. 480i is the default; switching modes restarts the game. |
+| **CRT Vertical Position** | Moves 240p, 480p, or 480i output vertically. Positive values move the picture down; the available offsets follow each mode's blanking margins. |
 | **Aspect Ratio** | Optimized selects the intended core aspect, Stretched fills the display, and Pixel Perfect requests direct pixel mapping. |
 
 ### Video Profiles
@@ -317,7 +327,7 @@ during one redraw. Strongly combining both is primarily a stylized effect.
 |---|---|
 | **Off** | Bypasses bloom and halo. Dot Scale, Tone Mapping, and both decay controls remain available. |
 | **A Touch of CRT** | Adds subtle CRT halo and bloom. |
-| **80s Cruise Control** | Adds stronger halo, bloom, and medium inter-frame decay. This is the default profile. |
+| **80s Cruise Control** | Adds stronger halo, bloom, and a restrained inter-frame trail. This is the default profile. |
 | **80s Overdrive** | Models a heavily driven arcade CRT with stronger glow and phosphor decay. |
 | **Red Alert** | Outside reality, where bright lines flash and fade but their glowing trails refuse to disappear. Impossible on a real CRT, spectacular in motion. |
 | **Ultraviolet** | Stylized high-energy vector presentation with excessive flashing bright lights. |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a VART artwork package and embed it in a MiSTer MRA."""
+"""Build a versioned VART artwork package and embed it in a MiSTer MRA."""
 
 from __future__ import annotations
 
@@ -32,11 +32,19 @@ ROLE_NAMES = {
     ROLE_FOREGROUND: "foreground",
 }
 
-ASTEROIDS_PLANES = {
-    (1360, 1080),
-    (916, 720),
-    (640, 480),
-    (640, 240),
+ARTWORK_FORMATS = {
+    "v2": {
+        (1360, 1080),
+        (916, 720),
+        (720, 480),
+        (720, 240),
+    },
+    "legacy": {
+        (1360, 1080),
+        (916, 720),
+        (640, 480),
+        (640, 240),
+    },
 }
 
 
@@ -560,7 +568,9 @@ def verify_container(container: bytes, planes: list[dict[str, object]]) -> None:
             raise ArtworkError(f"generated {name} has an invalid range")
 
 
-def validate_plane_set(planes: list[dict[str, object]], mra: Path) -> None:
+def validate_plane_set(
+    planes: list[dict[str, object]], mra: Path, package_format: str
+) -> None:
     seen: set[tuple[int, int, int]] = set()
     for plane in planes:
         key = (int(plane["role"]), int(plane["width"]), int(plane["height"]))
@@ -570,29 +580,29 @@ def validate_plane_set(planes: list[dict[str, object]], mra: Path) -> None:
             )
         seen.add(key)
 
+    supported = ARTWORK_FORMATS[package_format]
+    unsupported = sorted(
+        (int(plane["role"]), int(plane["width"]), int(plane["height"]))
+        for plane in planes
+        if (int(plane["width"]), int(plane["height"])) not in supported
+    )
+    if unsupported:
+        invalid = ", ".join(
+            f"{ROLE_NAMES[role]} {width}x{height}"
+            for role, width, height in unsupported
+        )
+        expected = ", ".join(
+            f"{width}x{height}" for width, height in sorted(supported, reverse=True)
+        )
+        raise ArtworkError(
+            f"{package_format} format does not support {invalid}; "
+            f"expected one or more of: {expected}"
+        )
+
     try:
-        root = ET.parse(mra).getroot()
+        ET.parse(mra)
     except Exception as error:
         raise ArtworkError(f"{mra}: cannot parse MRA XML: {error}") from error
-    setname = (root.findtext("setname") or "").strip().lower()
-    if setname == "astdelux":
-        actual = {
-            (int(plane["width"]), int(plane["height"]))
-            for plane in planes
-            if int(plane["role"]) == ROLE_BACKGROUND
-        }
-        if actual != ASTEROIDS_PLANES:
-            missing = sorted(ASTEROIDS_PLANES - actual)
-            extra = sorted(actual - ASTEROIDS_PLANES)
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(f"{w}x{h}" for w, h in missing))
-            if extra:
-                details.append("unsupported " + ", ".join(f"{w}x{h}" for w, h in extra))
-            raise ArtworkError(
-                "Asteroids Deluxe requires exactly four background planes: "
-                + "; ".join(details)
-            )
 
 
 def format_xml_part(container: bytes) -> str:
@@ -671,7 +681,11 @@ def write_mra(source: Path, destination: Path, container: bytes) -> None:
             temporary.unlink()
 
 
-def build_stats(planes: list[dict[str, object]], container: bytes) -> dict[str, object]:
+def build_stats(
+    planes: list[dict[str, object]],
+    container: bytes,
+    package_format: str,
+) -> dict[str, object]:
     plane_reports = []
     all_rows = []
     for plane in planes:
@@ -703,6 +717,7 @@ def build_stats(planes: list[dict[str, object]], container: bytes) -> dict[str, 
     return {
         "format": "VART",
         "version": VERSION,
+        "package_format": package_format,
         "round_trip": "exact",
         "container_bytes": len(container),
         "xml_hex_characters": len(container) * 2,
@@ -715,6 +730,7 @@ def build_stats(planes: list[dict[str, object]], container: bytes) -> dict[str, 
 
 def print_stats(stats: dict[str, object]) -> None:
     print("VART build complete")
+    print(f"  package format: {stats['package_format']}")
     print(f"  exact round-trip: {stats['round_trip']}")
     for plane in stats["planes"]:
         ratio = 100.0 * float(plane["ratio"])
@@ -750,6 +766,13 @@ def parse_arguments() -> argparse.Namespace:
         help="PNG files; prefix with background= or foreground= to set the layer role",
     )
     parser.add_argument(
+        "--format",
+        choices=tuple(ARTWORK_FORMATS),
+        default="v2",
+        dest="package_format",
+        help="plane set to build; v2 uses 720-wide 240p/480p planes (default)",
+    )
+    parser.add_argument(
         "--no-update-mra",
         action="store_true",
         help="build and validate outputs without writing a generated MRA",
@@ -766,10 +789,10 @@ def main() -> int:
     sources = [parse_image_argument(value) for value in arguments.images]
     planes = [encode_plane(role, path.resolve()) for role, path in sources]
     planes.sort(key=lambda plane: (int(plane["role"]), -int(plane["height"]), -int(plane["width"])))
-    validate_plane_set(planes, mra)
+    validate_plane_set(planes, mra, arguments.package_format)
     container = build_container(planes)
     verify_container(container, planes)
-    stats = build_stats(planes, container)
+    stats = build_stats(planes, container, arguments.package_format)
 
     generated = Path(__file__).resolve().parent / "generated"
     generated.mkdir(parents=True, exist_ok=True)

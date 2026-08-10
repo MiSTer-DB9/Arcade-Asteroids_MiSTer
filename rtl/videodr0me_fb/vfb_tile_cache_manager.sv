@@ -41,6 +41,7 @@ module vfb_tile_cache_manager #(
 	input  logic [BUF_IDX_W-1:0] buf_display,
 	input  logic        display_valid,
 	input  logic        has_draw_buf,
+	input  logic [BUFFER_COUNT-1:0] buf_draw_hot,
 
 	// DDRAM fill
 	output logic        fill_ready,
@@ -659,7 +660,7 @@ module vfb_tile_cache_manager #(
 			for (int i=0; i<BUFFER_COUNT; i++) begin
 				automatic logic is_display = display_valid && (buf_display == BUF_IDX_W'(i));
 				automatic logic is_clear   = (clear_state == CLEAR_PROCESS && active_clear_buf == BUF_IDX_W'(i));
-				automatic logic is_draw    = has_draw_buf && (buf_draw == BUF_IDX_W'(i));
+				automatic logic is_draw    = buf_draw_hot[i];
 
 				if (is_display) begin
 					buf_tilemap_addr[i] = display_tile_addr;
@@ -671,10 +672,8 @@ module vfb_tile_cache_manager #(
 					end
 				end else if (is_draw) begin
 					buf_tilemap_addr[i] = draw_tilemap_addr;
-					if (has_draw_buf) begin
-						buf_tilemap_we[i] = draw_we;
-						buf_tilemap_din[i] = draw_din;
-					end
+					buf_tilemap_we[i] = draw_we;
+					buf_tilemap_din[i] = draw_din;
 				end
 			end
 		end
