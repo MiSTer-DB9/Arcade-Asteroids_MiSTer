@@ -1,21 +1,28 @@
 # Asteroids Artwork Builder
 
 `build_artwork.py` validates indexed PNG artwork, compresses it into a VART
-container, and embeds that container as ROM index 2 in a new MiSTer MRA.
+container, and embeds that container as ROM index 2 in a new MiSTer MRA. The
+current 720-wide plane set is the default; use `--format legacy` for the former
+640-wide 240p and 480p planes.
 
 The supplied green and orange Asteroids Deluxe MRAs already contain their
-artwork. Use your own indexed images when building a custom version.
+artwork. The builder can also add artwork to a new copy of the supplied
+Asteroids or Lunar Lander MRA. Use your own indexed images when building a
+custom version.
 
 ## Required Images
 
-Supply one image for each supported output resolution:
+For complete resolution coverage, supply one image at each supported size:
 
 | Core Mode | Required Size |
 |---|---:|
 | 1080p | 1360x1080 |
 | 720p | 916x720 |
-| 480p | 640x480 |
-| 240p | 640x240 |
+| 480p / 480i | 720x480 |
+| 240p | 720x240 |
+
+Any MRA may contain a subset; artwork is shown only at the included
+resolutions. Every supplied image must match one of the sizes above.
 
 Run the builder from the repository root:
 
@@ -24,9 +31,12 @@ python artwork/build_artwork.py `
   "releases/Asteroids Deluxe (v3 green).mra" `
   "my_art/background_1360x1080.png" `
   "my_art/background_916x720.png" `
-  "my_art/background_640x480.png" `
-  "my_art/background_640x240.png"
+  "my_art/background_720x480.png" `
+  "my_art/background_720x240.png"
 ```
+
+For an older core using 640-wide low-resolution video, pass `--format legacy`
+and supply 640x480 and 640x240 planes instead.
 
 The source MRA is never modified. The generated MRA is written beside it with
 an `_art` suffix. If that filename already exists, the builder uses `_art1`,

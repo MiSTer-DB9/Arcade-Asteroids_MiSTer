@@ -42,6 +42,7 @@ module vfb_buffer_controller #(
 	output logic                 display_valid,
 	output logic                 display_is_composed,
 	output logic                 has_draw_buf,
+	output logic [BUFFER_COUNT-1:0] buf_draw_hot,
 	output logic                 raw_frame_dropped,
 	output logic [BUF_IDX_W-1:0] raw_frame_dropped_buf,
 	output logic                 readout_frame_start
@@ -65,13 +66,13 @@ module vfb_buffer_controller #(
 	logic                 accumulator_valid;
 	logic [BUF_IDX_W-1:0] accumulator_buf;
 	logic                 compose_active;
+	logic                 inter_enabled = 1'b0;
 	logic                 inter_enabled_q;
 	logic [1:0]           buffer_mode_q = 2'd0;
-	logic [1:0]           inter_frame_mode_q = 2'd0;
 
 	always_ff @(posedge clk_sys) begin
 		buffer_mode_q <= BUFFER_MODE;
-		inter_frame_mode_q <= inter_frame_mode;
+		inter_enabled <= (inter_frame_mode != 2'd0);
 	end
 
 	logic                 has_display;
@@ -79,6 +80,7 @@ module vfb_buffer_controller #(
 	logic                 has_drawn;
 	logic                 has_dirty;
 	logic                 has_clean;
+	logic [BUFFER_COUNT-1:0] drawing_mask;
 	logic [BUFFER_COUNT-1:0] drawn_mask;
 	logic [BUFFER_COUNT-1:0] drawn_by_age;
 	logic [BUFFER_COUNT-1:0] drawn_at_age [0:BUFFER_COUNT-1];
@@ -112,24 +114,13 @@ module vfb_buffer_controller #(
 		end
 	endfunction
 
-	function automatic logic onehot_valid(
-		input logic [BUFFER_COUNT-1:0] onehot
-	);
-		begin
-			case (onehot)
-				5'b00001, 5'b00010, 5'b00100,
-				5'b01000, 5'b10000: onehot_valid = 1'b1;
-				default:              onehot_valid = 1'b0;
-			endcase
-		end
-	endfunction
-
 	always_comb begin
 		has_display = 1'b0;
 		has_drawing = 1'b0;
 		has_drawn = 1'b0;
 		has_dirty = 1'b0;
 		has_clean = 1'b0;
+		drawing_mask = '0;
 		drawn_mask = '0;
 		display_idx = '0;
 		dirty_idx = '0;
@@ -143,8 +134,10 @@ module vfb_buffer_controller #(
 				display_idx = BUF_IDX_W'(i);
 			end
 
-			if (buf_state[i] == ST_DRAWING)
+			if (buf_state[i] == ST_DRAWING) begin
 				has_drawing = 1'b1;
+				drawing_mask[i] = 1'b1;
+			end
 
 			if (buf_state[i] == ST_DRAWN) begin
 				has_drawn = 1'b1;
@@ -205,10 +198,12 @@ module vfb_buffer_controller #(
 	logic                 has_draw_buf_reg;
 	logic                 display_valid_reg;
 	logic                 display_composed_reg;
+	(* preserve, dont_merge *) logic [BUFFER_COUNT-1:0] buf_draw_hot_reg;
 
 	assign buf_draw = internal_buf_draw;
 	assign buf_display_out = buf_display_reg;
 	assign has_draw_buf = has_draw_buf_reg;
+	assign buf_draw_hot = buf_draw_hot_reg;
 	assign display_valid = display_valid_reg;
 	assign display_is_composed = display_composed_reg;
 	assign compose_req = compose_active;
@@ -216,11 +211,13 @@ module vfb_buffer_controller #(
 		if (reset) begin
 			buf_display_reg <= '0;
 			has_draw_buf_reg <= 1'b0;
+			buf_draw_hot_reg <= '0;
 			display_valid_reg <= 1'b0;
 			display_composed_reg <= 1'b0;
 		end else begin
 			buf_display_reg <= display_idx;
 			has_draw_buf_reg <= has_drawing;
+			buf_draw_hot_reg <= drawing_mask;
 			display_valid_reg <= has_display;
 			display_composed_reg <= buffer_is_composed[display_idx];
 		end
@@ -232,33 +229,28 @@ module vfb_buffer_controller #(
 	logic [1:0] display_settle_count;
 	localparam logic [1:0] DISPLAY_SETTLE_CYCLES = 2'd3;
 
-	wire inter_enabled = (inter_frame_mode_q != 2'd0);
 	wire inter_enable_rise = inter_enabled && !inter_enabled_q;
 	wire inter_enable_fall = !inter_enabled && inter_enabled_q;
 	wire evt_flush_complete = flush_in_progress && flush_done;
 	wire select_vbl_promote_raw = vbl_swap_req &&
 	                              (buffer_mode_q == 2'd0) &&
 	                              !inter_enabled;
-	wire oldest_drawn_valid = onehot_valid(oldest_drawn_onehot);
-	wire newest_drawn_valid = onehot_valid(newest_drawn_onehot);
 	wire accumulator_idx_valid = (accumulator_buf < BUF_IDX_W'(BUFFER_COUNT));
-	wire evt_vbl_promote_raw = select_vbl_promote_raw && has_drawn &&
-	                           newest_drawn_valid;
+	wire evt_vbl_promote_raw = select_vbl_promote_raw && has_drawn;
 	wire evt_vbl_promote_composed = vbl_swap_req && (buffer_mode_q != 2'd2) &&
 	                                inter_enabled && accumulator_valid &&
 	                                accumulator_idx_valid &&
 	                                (buf_state[accumulator_buf] == ST_COMPOSED);
 	wire select_compose_start = inter_enabled && !inter_enable_rise &&
 	                            !compose_active;
-	wire evt_compose_start = select_compose_start && has_drawn &&
-	                         oldest_drawn_valid;
+	wire evt_compose_start = select_compose_start && has_drawn;
 	wire evt_compose_complete = compose_active && compose_done;
 	wire evt_assign_draw = !has_drawing && has_clean && !flush_in_progress;
 	wire evt_clear_complete = clear_req && clear_done;
 	wire evt_clear_start = !clear_req && has_dirty;
 	wire select_drop_raw = inter_enabled && compose_active && !has_drawing &&
 	                       !has_clean && !has_dirty && !clear_req;
-	wire evt_drop_raw = select_drop_raw && has_drawn && oldest_drawn_valid;
+	wire evt_drop_raw = select_drop_raw && has_drawn;
 
 	logic [BUFFER_COUNT-1:0] completed_buffer_onehot;
 	logic [BUFFER_COUNT-1:0] completed_order_position;
@@ -370,7 +362,7 @@ module vfb_buffer_controller #(
 				end else if (evt_vbl_promote_composed &&
 				             (buf_state[i] == ST_DISPLAY)) begin
 					buf_state[i] <= ST_DIRTY;
-				end else if (evt_vbl_promote_raw &&
+				end else if (select_vbl_promote_raw &&
 				             newest_drawn_onehot[i]) begin
 					buf_state[i] <= ST_DISPLAY;
 				end else if (evt_vbl_promote_raw &&
@@ -384,14 +376,14 @@ module vfb_buffer_controller #(
 				             (buffer_mode_q != 2'd0) &&
 				             (buf_state[i] == ST_DISPLAY)) begin
 					buf_state[i] <= ST_DIRTY;
-				end else if (evt_compose_start &&
+				end else if (select_compose_start &&
 				             oldest_drawn_onehot[i]) begin
 					buf_state[i] <= ST_COMPOSING;
 				end else if (!inter_enabled && (buf_state[i] == ST_DRAWN) &&
 				             ((buffer_mode_q != 2'd0) || evt_flush_complete ||
 				              evt_vbl_promote_raw)) begin
 					buf_state[i] <= ST_DIRTY;
-				end else if (evt_drop_raw &&
+				end else if (select_drop_raw &&
 				             oldest_drawn_onehot[i]) begin
 					buf_state[i] <= ST_DIRTY;
 				end else if (evt_assign_draw &&

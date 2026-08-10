@@ -75,6 +75,7 @@ module vfb_overlay #(
 	localparam integer ROW_ADDR_W = $clog2(MAX_WIDTH);
 	localparam integer PLANE_INDEX_W = (MAX_PLANES <= 1) ? 1 : $clog2(MAX_PLANES);
 	localparam logic [7:0] MAX_PLANES_COUNT = MAX_PLANES[7:0];
+	localparam logic [26:0] DESCRIPTOR_STORAGE_END = 27'(64 + MAX_PLANES * 48);
 
 	function automatic [31:0] crc32_byte(
 		input logic [31:0] crc_in,
@@ -90,17 +91,6 @@ module vfb_overlay #(
 		end
 	endfunction
 
-	function automatic [5:0] descriptor_byte_offset(
-		input logic [26:0] address,
-		input integer plane_index
-	);
-		logic [26:0] offset;
-		begin
-			offset = address - 27'(64 + plane_index * 48);
-			descriptor_byte_offset = offset[5:0];
-		end
-	endfunction
-
 	function automatic logic valid_dimensions(
 		input logic [11:0] width,
 		input logic [11:0] height
@@ -109,6 +99,8 @@ module vfb_overlay #(
 			valid_dimensions =
 				((width == 12'd1360) && (height == 12'd1080)) ||
 				((width == 12'd916)  && (height == 12'd720))  ||
+				((width == 12'd720)  && (height == 12'd480))  ||
+				((width == 12'd720)  && (height == 12'd240))  ||
 				((width == 12'd640)  && (height == 12'd480))  ||
 				((width == 12'd640)  && (height == 12'd240));
 		end
@@ -122,6 +114,8 @@ module vfb_overlay #(
 			case ({width, height})
 				{12'd1360, 12'd1080}: expected_pixels = 32'd1468800;
 				{12'd916,  12'd720}:  expected_pixels = 32'd659520;
+				{12'd720,  12'd480}:  expected_pixels = 32'd345600;
+				{12'd720,  12'd240}:  expected_pixels = 32'd172800;
 				{12'd640,  12'd480}:  expected_pixels = 32'd307200;
 				{12'd640,  12'd240}:  expected_pixels = 32'd153600;
 				default:               expected_pixels = 32'd0;
@@ -149,6 +143,18 @@ module vfb_overlay #(
 				3'b110: blend_weight = 7'd24; // -2: 37.5%
 				default: blend_weight = 7'd25; // -1: 39.1%
 			endcase
+		end
+	endfunction
+
+	function automatic [7:0] divide_255_rounded(input logic [15:0] value);
+		logic [8:0] fold;
+		begin
+			// Exact integer form of round(value / 255): value is 256*hi + lo,
+			// so the residual hi + lo adds one at 128 and another at 383.
+			fold = {1'b0, value[15:8]} + {1'b0, value[7:0]};
+			divide_255_rounded = value[15:8] +
+				{7'd0, (fold >= 9'd128)} +
+				{7'd0, (fold >= 9'd383)};
 		end
 	endfunction
 
@@ -297,6 +303,13 @@ module vfb_overlay #(
 	logic [31:0] vart_expected_crc = 32'd0;
 	logic [31:0] vart_descriptor_offset = 32'd0;
 	logic [15:0] vart_descriptor_size = 16'd0;
+	logic [26:0] descriptor_region_end = 27'd64;
+	logic [PLANE_INDEX_W-1:0] descriptor_slot = '0;
+	logic [5:0] descriptor_byte = 6'd0;
+	logic descriptor_write_q = 1'b0;
+	logic [PLANE_INDEX_W-1:0] descriptor_write_slot_q = '0;
+	logic [5:0] descriptor_write_byte_q = 6'd0;
+	logic [7:0] descriptor_write_data_q = 8'd0;
 
 	logic [11:0] plane_width [0:MAX_PLANES-1];
 	logic [11:0] plane_height [0:MAX_PLANES-1];
@@ -408,10 +421,9 @@ module vfb_overlay #(
 	assign upload_write_data = upload_qword_data;
 	assign upload_write_be = upload_qword_be;
 
-	integer upload_clear_index;
-	integer descriptor_index;
 	always_ff @(posedge clk_sys) begin
 		upload_fifo_rd <= 1'b0;
+		descriptor_write_q <= 1'b0;
 
 		if (upload_reset) begin
 			upload_in_progress <= 1'b0;
@@ -420,9 +432,64 @@ module vfb_overlay #(
 			upload_validate <= 1'b0;
 			upload_final_write <= 1'b0;
 			upload_qword_pending <= 1'b0;
-			upload_pack_data <= 64'd0;
 			upload_pack_be <= 8'd0;
+			descriptor_region_end <= 27'd64;
+			descriptor_slot <= '0;
+			descriptor_byte <= 6'd0;
+			descriptor_write_q <= 1'b0;
 		end else begin
+			if (descriptor_write_q) begin
+				case (descriptor_write_byte_q)
+					0:  plane_width[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					1: begin
+						plane_width[descriptor_write_slot_q][11:8] <= descriptor_write_data_q[3:0];
+						if (descriptor_write_data_q[7:4] != 4'd0) upload_error <= 1'b1;
+					end
+					2:  plane_height[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					3: begin
+						plane_height[descriptor_write_slot_q][11:8] <= descriptor_write_data_q[3:0];
+						if (descriptor_write_data_q[7:4] != 4'd0) upload_error <= 1'b1;
+					end
+					4:  plane_layer[descriptor_write_slot_q] <= descriptor_write_data_q;
+					5:  plane_role[descriptor_write_slot_q] <= descriptor_write_data_q;
+					6:  plane_index_bits[descriptor_write_slot_q] <= descriptor_write_data_q;
+					7:  plane_flags[descriptor_write_slot_q] <= descriptor_write_data_q;
+					8:  plane_palette_entries[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					9:  plane_palette_entries[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					12: plane_palette_offset[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					13: plane_palette_offset[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					14: plane_palette_offset[descriptor_write_slot_q][23:16] <= descriptor_write_data_q;
+					15: plane_palette_offset[descriptor_write_slot_q][31:24] <= descriptor_write_data_q;
+					16: plane_palette_size[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					17: plane_palette_size[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					18: plane_palette_size[descriptor_write_slot_q][23:16] <= descriptor_write_data_q;
+					19: plane_palette_size[descriptor_write_slot_q][31:24] <= descriptor_write_data_q;
+					20: plane_payload_offset[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					21: plane_payload_offset[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					22: plane_payload_offset[descriptor_write_slot_q][23:16] <= descriptor_write_data_q;
+					23: plane_payload_offset[descriptor_write_slot_q][31:24] <= descriptor_write_data_q;
+					24: plane_payload_size[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					25: plane_payload_size[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					26: plane_payload_size[descriptor_write_slot_q][23:16] <= descriptor_write_data_q;
+					27: plane_payload_size[descriptor_write_slot_q][31:24] <= descriptor_write_data_q;
+					28: plane_pixel_count[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					29: plane_pixel_count[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					30: plane_pixel_count[descriptor_write_slot_q][23:16] <= descriptor_write_data_q;
+					31: plane_pixel_count[descriptor_write_slot_q][31:24] <= descriptor_write_data_q;
+					32: plane_row_count[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					33: plane_row_count[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					34: plane_row_count[descriptor_write_slot_q][23:16] <= descriptor_write_data_q;
+					35: plane_row_count[descriptor_write_slot_q][31:24] <= descriptor_write_data_q;
+					36: plane_layout[descriptor_write_slot_q][7:0] <= descriptor_write_data_q;
+					37: plane_layout[descriptor_write_slot_q][15:8] <= descriptor_write_data_q;
+					38: plane_layout[descriptor_write_slot_q][23:16] <= descriptor_write_data_q;
+					39: plane_layout[descriptor_write_slot_q][31:24] <= descriptor_write_data_q;
+					10, 11, 40, 41, 42, 43, 44, 45, 46, 47:
+						if (descriptor_write_data_q != 8'd0) upload_error <= 1'b1;
+					default: ;
+				endcase
+			end
+
 			if (upload_write_advance)
 				upload_qword_pending <= 1'b0;
 
@@ -450,7 +517,6 @@ module vfb_overlay #(
 					upload_expected_addr <= 27'd0;
 					upload_received_bytes <= 32'd0;
 					upload_crc <= 32'hffffffff;
-					upload_pack_data <= 64'd0;
 					upload_pack_be <= 8'd0;
 					vart_layer_count <= 8'd0;
 					vart_plane_count <= 8'd0;
@@ -458,29 +524,14 @@ module vfb_overlay #(
 					vart_expected_crc <= 32'd0;
 					vart_descriptor_offset <= 32'd0;
 					vart_descriptor_size <= 16'd0;
-					for (upload_clear_index = 0;
-					     upload_clear_index < MAX_PLANES;
-					     upload_clear_index = upload_clear_index + 1) begin
-						plane_width[upload_clear_index] <= 12'd0;
-						plane_height[upload_clear_index] <= 12'd0;
-						plane_layer[upload_clear_index] <= 8'd0;
-						plane_role[upload_clear_index] <= 8'd0;
-						plane_index_bits[upload_clear_index] <= 8'd0;
-						plane_flags[upload_clear_index] <= 8'd0;
-						plane_palette_entries[upload_clear_index] <= 16'd0;
-						plane_palette_offset[upload_clear_index] <= 32'd0;
-						plane_palette_size[upload_clear_index] <= 32'd0;
-						plane_payload_offset[upload_clear_index] <= 32'd0;
-						plane_payload_size[upload_clear_index] <= 32'd0;
-						plane_pixel_count[upload_clear_index] <= 32'd0;
-						plane_row_count[upload_clear_index] <= 32'd0;
-						plane_layout[upload_clear_index] <= 32'd0;
-					end
+					descriptor_region_end <= 27'd64;
+					descriptor_slot <= '0;
+					descriptor_byte <= 6'd0;
 				end
 
 				if (upload_event_has_data &&
 				    (upload_in_progress || upload_event_start)) begin
-					next_pack_data = upload_event_start ? 64'd0 : upload_pack_data;
+					next_pack_data = upload_pack_data;
 					next_pack_be = upload_event_start ? 8'd0 : upload_pack_be;
 					crc_base = upload_event_start ? 32'hffffffff : upload_crc;
 
@@ -499,7 +550,6 @@ module vfb_overlay #(
 						                     {5'd0, upload_event_addr[26:3]};
 						upload_qword_data <= next_pack_data;
 						upload_qword_be <= next_pack_be;
-						upload_pack_data <= 64'd0;
 						upload_pack_be <= 8'd0;
 					end else begin
 						upload_pack_data <= next_pack_data;
@@ -517,7 +567,12 @@ module vfb_overlay #(
 						27'd4:  if (upload_event_data != 8'd1) upload_error <= 1'b1;
 						27'd5:  if (upload_event_data != 8'd0) upload_error <= 1'b1;
 						27'd6:  vart_layer_count <= upload_event_data;
-						27'd7:  vart_plane_count <= upload_event_data;
+						27'd7: begin
+							vart_plane_count <= upload_event_data;
+							descriptor_region_end <= 27'd64 +
+								({19'd0, upload_event_data} << 5) +
+								({19'd0, upload_event_data} << 4);
+						end
 						27'd8:  vart_total_size[7:0] <= upload_event_data;
 						27'd9:  vart_total_size[15:8] <= upload_event_data;
 						27'd10: vart_total_size[23:16] <= upload_event_data;
@@ -539,62 +594,18 @@ module vfb_overlay #(
 								upload_error <= 1'b1;
 					endcase
 
-					for (descriptor_index = 0;
-					     descriptor_index < MAX_PLANES;
-					     descriptor_index = descriptor_index + 1) begin
-						if ((descriptor_index < vart_plane_count) &&
-						    (upload_event_addr >= (27'd64 + descriptor_index * 48)) &&
-						    (upload_event_addr <  (27'd112 + descriptor_index * 48))) begin
-							case (descriptor_byte_offset(upload_event_addr,
-							                             descriptor_index))
-								0:  plane_width[descriptor_index][7:0] <= upload_event_data;
-								1: begin
-									plane_width[descriptor_index][11:8] <= upload_event_data[3:0];
-									if (upload_event_data[7:4] != 4'd0) upload_error <= 1'b1;
-								end
-								2:  plane_height[descriptor_index][7:0] <= upload_event_data;
-								3: begin
-									plane_height[descriptor_index][11:8] <= upload_event_data[3:0];
-									if (upload_event_data[7:4] != 4'd0) upload_error <= 1'b1;
-								end
-								4:  plane_layer[descriptor_index] <= upload_event_data;
-								5:  plane_role[descriptor_index] <= upload_event_data;
-								6:  plane_index_bits[descriptor_index] <= upload_event_data;
-								7:  plane_flags[descriptor_index] <= upload_event_data;
-								8:  plane_palette_entries[descriptor_index][7:0] <= upload_event_data;
-								9:  plane_palette_entries[descriptor_index][15:8] <= upload_event_data;
-								12: plane_palette_offset[descriptor_index][7:0] <= upload_event_data;
-								13: plane_palette_offset[descriptor_index][15:8] <= upload_event_data;
-								14: plane_palette_offset[descriptor_index][23:16] <= upload_event_data;
-								15: plane_palette_offset[descriptor_index][31:24] <= upload_event_data;
-								16: plane_palette_size[descriptor_index][7:0] <= upload_event_data;
-								17: plane_palette_size[descriptor_index][15:8] <= upload_event_data;
-								18: plane_palette_size[descriptor_index][23:16] <= upload_event_data;
-								19: plane_palette_size[descriptor_index][31:24] <= upload_event_data;
-								20: plane_payload_offset[descriptor_index][7:0] <= upload_event_data;
-								21: plane_payload_offset[descriptor_index][15:8] <= upload_event_data;
-								22: plane_payload_offset[descriptor_index][23:16] <= upload_event_data;
-								23: plane_payload_offset[descriptor_index][31:24] <= upload_event_data;
-								24: plane_payload_size[descriptor_index][7:0] <= upload_event_data;
-								25: plane_payload_size[descriptor_index][15:8] <= upload_event_data;
-								26: plane_payload_size[descriptor_index][23:16] <= upload_event_data;
-								27: plane_payload_size[descriptor_index][31:24] <= upload_event_data;
-								28: plane_pixel_count[descriptor_index][7:0] <= upload_event_data;
-								29: plane_pixel_count[descriptor_index][15:8] <= upload_event_data;
-								30: plane_pixel_count[descriptor_index][23:16] <= upload_event_data;
-								31: plane_pixel_count[descriptor_index][31:24] <= upload_event_data;
-								32: plane_row_count[descriptor_index][7:0] <= upload_event_data;
-								33: plane_row_count[descriptor_index][15:8] <= upload_event_data;
-								34: plane_row_count[descriptor_index][23:16] <= upload_event_data;
-								35: plane_row_count[descriptor_index][31:24] <= upload_event_data;
-								36: plane_layout[descriptor_index][7:0] <= upload_event_data;
-								37: plane_layout[descriptor_index][15:8] <= upload_event_data;
-								38: plane_layout[descriptor_index][23:16] <= upload_event_data;
-								39: plane_layout[descriptor_index][31:24] <= upload_event_data;
-								10, 11, 40, 41, 42, 43, 44, 45, 46, 47:
-									if (upload_event_data != 8'd0) upload_error <= 1'b1;
-								default: ;
-							endcase
+					if ((upload_event_addr >= 27'd64) &&
+					    (upload_event_addr < descriptor_region_end) &&
+					    (upload_event_addr < DESCRIPTOR_STORAGE_END)) begin
+						descriptor_write_q <= 1'b1;
+						descriptor_write_slot_q <= descriptor_slot;
+						descriptor_write_byte_q <= descriptor_byte;
+						descriptor_write_data_q <= upload_event_data;
+						if (descriptor_byte == 6'd47) begin
+							descriptor_byte <= 6'd0;
+							descriptor_slot <= descriptor_slot + 1'b1;
+						end else begin
+							descriptor_byte <= descriptor_byte + 1'b1;
 						end
 					end
 				end
@@ -608,7 +619,6 @@ module vfb_overlay #(
 						                     {5'd0, upload_expected_addr[26:3]};
 						upload_qword_data <= upload_pack_data;
 						upload_qword_be <= upload_pack_be;
-						upload_pack_data <= 64'd0;
 						upload_pack_be <= 8'd0;
 					end
 				end
@@ -933,14 +943,18 @@ module vfb_overlay #(
 	logic [ROW_ADDR_W-1:0] row1_port_a_addr;
 	logic [7:0] row0_copy_data = 8'd0;
 	logic [7:0] row1_copy_data = 8'd0;
+	logic [7:0] copy_hold_data = 8'd0;
+	logic       copy_hold_valid = 1'b0;
 	logic [7:0] row0_display_data = 8'd0;
 	logic [7:0] row1_display_data = 8'd0;
 	logic [ROW_ADDR_W-1:0] display_read_addr = '0;
 
 	wire decode_target_bank = decode_row[0];
 	wire decode_previous_bank = ~decode_target_bank;
-	wire [7:0] decode_previous_data = decode_previous_bank ?
-	                                         row1_copy_data : row0_copy_data;
+	wire [7:0] decode_previous_ram_data =
+		decode_previous_bank ? row1_copy_data : row0_copy_data;
+	wire [7:0] decode_previous_data =
+		copy_hold_valid ? copy_hold_data : decode_previous_ram_data;
 
 	logic [15:0] decode_window;
 	always_comb begin
@@ -976,10 +990,30 @@ module vfb_overlay #(
 	wire [3:0] decoder_candidate_pairs = !decoder_candidate_consumes ? 4'd0 :
 		(decode_state == DEC_TOKEN) ? token_required_pairs :
 		{1'b0, active_index_pairs};
-	wire [3:0] decoder_phase_sum =
-		{2'd0, decode_front_phase} + decoder_candidate_pairs;
-	wire [1:0] decoder_candidate_bytes = decoder_phase_sum[3:2];
-	wire [1:0] decoder_candidate_phase = decoder_phase_sum[1:0];
+	wire [3:0] decoder_index_phase_sum =
+		{2'd0, decode_front_phase} + {1'b0, active_index_pairs};
+	logic [1:0] decoder_candidate_bytes;
+	logic [1:0] decoder_candidate_phase;
+	always_comb begin
+		decoder_candidate_bytes = 2'd0;
+		decoder_candidate_phase = decode_front_phase;
+		case (decode_state)
+			DEC_TOKEN: begin
+				if (token_is_copy) begin
+					decoder_candidate_bytes = 2'd1;
+				end else begin
+					decoder_candidate_bytes =
+						decoder_index_phase_sum[3:2] + 2'd1;
+					decoder_candidate_phase = decoder_index_phase_sum[1:0];
+				end
+			end
+			DEC_LITERAL: begin
+				decoder_candidate_bytes = decoder_index_phase_sum[3:2];
+				decoder_candidate_phase = decoder_index_phase_sum[1:0];
+			end
+			default: begin end
+		endcase
+	end
 
 	wire decoder_prefetch_tail = decoder_stream_state &&
 		(decode_tail_count <= 4'd2) && decode_word_available &&
@@ -1086,6 +1120,12 @@ module vfb_overlay #(
 		decoder_emit && decoder_candidate_consumes;
 	wire decoder_consumes_front_with_refill =
 		decoder_emit_without_stream && decoder_candidate_consumes;
+	wire decoder_pair_count_commit = decoder_consumes_front &&
+		((decode_state == DEC_TOKEN) || (decode_run_left != 0));
+	wire [14:0] decode_pairs_left_consumed =
+		decode_pairs_left - {11'd0, decoder_candidate_pairs};
+	wire decoder_row_load = (decode_state == DEC_ROW_START) &&
+		decode_input_valid && !decode_input_word[0];
 	wire [1:0] decoder_byte_advance = decoder_consumes_front ?
 		decoder_candidate_bytes : 2'd0;
 	wire [6:0] decode_buffered_pairs_consumed =
@@ -1122,14 +1162,8 @@ module vfb_overlay #(
 			4'd0;
 	end
 
-	logic [11:0] copy_source_addr;
-	always_comb begin
-		copy_source_addr = ((decode_state == DEC_IDLE) ||
-		                    (decode_state == DEC_ROW_START)) ? 12'd0 : decode_x;
-		if ((decode_state != DEC_IDLE) &&
-		    (decode_state != DEC_ROW_START) && decoder_prefetch_advance)
-			copy_source_addr = decode_x_plus_one;
-	end
+	wire [11:0] copy_source_addr =
+		decoder_stream_state ? decode_x_plus_one : 12'd0;
 
 	always_comb begin
 		row0_port_a_addr = '0;
@@ -1175,6 +1209,17 @@ module vfb_overlay #(
 	wire row_ready_at_start = row_valid[bank_at_start] &&
 	                          (row_number[bank_at_start] == line_at_start);
 
+	// Row start replaces stale payload before decoder state permits its use.
+	always_ff @(posedge clk_sys) begin
+		if (decoder_row_load) begin
+			decode_front <= decode_input_word[47:16];
+			decode_front_phase <= 2'd0;
+		end else if (decoder_consumes_front) begin
+			decode_front <= decode_front_next;
+			decode_front_phase <= decoder_candidate_phase;
+		end
+	end
+
 	always_ff @(posedge clk_sys) begin
 		compressed_fifo_rd <= 1'b0;
 		row_write_enable <= 1'b0;
@@ -1184,8 +1229,8 @@ module vfb_overlay #(
 
 		if (reset || video_timing_reset || stream_decoder_reset) begin
 			decode_state <= DEC_IDLE;
-			decode_front <= 32'd0;
-			decode_front_phase <= 2'd0;
+			copy_hold_data <= 8'd0;
+			copy_hold_valid <= 1'b0;
 			decode_tail <= 80'd0;
 			decode_tail_count <= 4'd0;
 			decode_buffered_pairs <= 7'd0;
@@ -1208,20 +1253,25 @@ module vfb_overlay #(
 			decode_input_word <= 64'd0;
 			decode_input_valid <= 1'b0;
 		end else begin
+			if (!decoder_stream_state || decoder_prefetch_advance) begin
+				copy_hold_valid <= 1'b0;
+			end else if (!copy_hold_valid) begin
+				copy_hold_data <= decode_previous_ram_data;
+				copy_hold_valid <= 1'b1;
+			end
+
 			if (!decode_input_valid && !compressed_fifo_empty) begin
 				compressed_fifo_rd <= 1'b1;
 				decode_input_word <= compressed_fifo_data;
 				decode_input_valid <= 1'b1;
 			end
+			if (decode_state == DEC_TOKEN)
+				decode_run_left <= {1'b0, token_count_minus_one};
 
 			if (decoder_prefetch_tail) begin
 				decode_input_valid <= 1'b0;
 				decode_words_remaining <= decode_words_remaining - 1'b1;
 				decode_word_available <= (decode_words_remaining != 11'd1);
-			end
-			if (decoder_consumes_front) begin
-				decode_front <= decode_front_next;
-				decode_front_phase <= decoder_candidate_phase;
 			end
 			if (decoder_prefetch_tail ||
 			    (decoder_consumes_front && (decoder_byte_advance != 0))) begin
@@ -1235,6 +1285,8 @@ module vfb_overlay #(
 			end else if (decoder_consumes_front) begin
 				decode_buffered_pairs <= decode_buffered_pairs_consumed;
 			end
+			if (decoder_pair_count_commit)
+				decode_pairs_left <= decode_pairs_left_consumed;
 			if (decoder_prefetch_advance)
 				decode_x_plus_one <= decode_x_plus_one + 1'b1;
 
@@ -1276,8 +1328,6 @@ module vfb_overlay #(
 							decode_pairs_left <= decode_input_word[15:1];
 							decode_words_remaining <= row_start_word_count - 1'b1;
 							decode_word_available <= (row_start_word_count > 11'd1);
-							decode_front <= decode_input_word[47:16];
-							decode_front_phase <= 2'd0;
 							decode_tail <= {64'd0, decode_input_word[63:48]};
 							decode_tail_count <= 4'd2;
 							decode_buffered_pairs <= 7'd24;
@@ -1308,24 +1358,20 @@ module vfb_overlay #(
 						row_write_addr <= decode_x;
 						decode_x <= decode_x + 1'b1;
 						decode_room <= decode_room - 1'b1;
-						decode_run_left <= {1'b0, token_count_minus_one};
 
 						if (token_is_literal || token_is_repeat) begin
 							case (active_index_mode)
 								INDEX_MODE_4: begin
 									row_write_data <= {4'd0, decode_window[11:8]};
 									decode_repeat_value <= {4'd0, decode_window[11:8]};
-									decode_pairs_left <= decode_pairs_left - 15'd6;
 								end
 								INDEX_MODE_6: begin
 									row_write_data <= {2'd0, decode_window[13:8]};
 									decode_repeat_value <= {2'd0, decode_window[13:8]};
-									decode_pairs_left <= decode_pairs_left - 15'd7;
 								end
 								default: begin
 									row_write_data <= decode_window[15:8];
 									decode_repeat_value <= decode_window[15:8];
-									decode_pairs_left <= decode_pairs_left - 15'd8;
 								end
 							endcase
 							if (token_count_minus_one == 0)
@@ -1336,7 +1382,6 @@ module vfb_overlay #(
 								decode_state <= DEC_REPEAT;
 						end else begin
 							row_write_data <= decode_previous_data;
-							decode_pairs_left <= decode_pairs_left - 15'd4;
 							decode_state <= (token_count_minus_one == 0) ?
 							                DEC_TOKEN : DEC_COPY;
 						end
@@ -1358,15 +1403,12 @@ module vfb_overlay #(
 						case (active_index_mode)
 							INDEX_MODE_4: begin
 								row_write_data <= {4'd0, decode_window[3:0]};
-								decode_pairs_left <= decode_pairs_left - 15'd2;
 							end
 							INDEX_MODE_6: begin
 								row_write_data <= {2'd0, decode_window[5:0]};
-								decode_pairs_left <= decode_pairs_left - 15'd3;
 							end
 							default: begin
 								row_write_data <= decode_window[7:0];
-								decode_pairs_left <= decode_pairs_left - 15'd4;
 							end
 						endcase
 						decode_x <= decode_x + 1'b1;
@@ -1478,15 +1520,9 @@ module vfb_overlay #(
 	wire [14:0] alpha_weight_rounded = alpha_weight_s4 + 15'd128;
 	wire [14:0] alpha_weight_scaled = alpha_weight_rounded +
 	                                          (alpha_weight_rounded >> 8);
-	wire [16:0] screen_r_rounded_s7 = 17'(screen_r_product_s7) + 17'd128;
-	wire [16:0] screen_g_rounded_s7 = 17'(screen_g_product_s7) + 17'd128;
-	wire [16:0] screen_b_rounded_s7 = 17'(screen_b_product_s7) + 17'd128;
-	wire [16:0] screen_r_scaled_s7 = screen_r_rounded_s7 +
-	                                       (screen_r_rounded_s7 >> 8);
-	wire [16:0] screen_g_scaled_s7 = screen_g_rounded_s7 +
-	                                       (screen_g_rounded_s7 >> 8);
-	wire [16:0] screen_b_scaled_s7 = screen_b_rounded_s7 +
-	                                       (screen_b_rounded_s7 >> 8);
+	wire [7:0] screen_r_div255_s7 = divide_255_rounded(screen_r_product_s7);
+	wire [7:0] screen_g_div255_s7 = divide_255_rounded(screen_g_product_s7);
+	wire [7:0] screen_b_div255_s7 = divide_255_rounded(screen_b_product_s7);
 	wire [7:0] screen_r_foreground_inv_s6 = pixel_s6.r ^ 8'hff;
 	wire [7:0] screen_g_foreground_inv_s6 = pixel_s6.g ^ 8'hff;
 	wire [7:0] screen_b_foreground_inv_s6 = pixel_s6.b ^ 8'hff;
@@ -1540,7 +1576,6 @@ module vfb_overlay #(
 			pixel_s0.hblank <= video_hblank_in;
 			pixel_s0.vblank <= video_vblank_in;
 			pixel_s0.art_valid <= run_requested && input_line_ready &&
-			                      !video_hblank_in && !video_vblank_in &&
 			                      (input_line_number < render_height);
 			pixel_s0.row_bank <= input_row_bank;
 
@@ -1588,11 +1623,11 @@ module vfb_overlay #(
 				16'(screen_b_foreground_inv_s6) * 16'(screen_b_artwork_inv_s6);
 
 			video_r_out <= pixel_s7.hblank || pixel_s7.vblank ?
-			               8'd0 : 8'd255 - screen_r_scaled_s7[15:8];
+			               8'd0 : ~screen_r_div255_s7;
 			video_g_out <= pixel_s7.hblank || pixel_s7.vblank ?
-			               8'd0 : 8'd255 - screen_g_scaled_s7[15:8];
+			               8'd0 : ~screen_g_div255_s7;
 			video_b_out <= pixel_s7.hblank || pixel_s7.vblank ?
-			               8'd0 : 8'd255 - screen_b_scaled_s7[15:8];
+			               8'd0 : ~screen_b_div255_s7;
 			video_hs_out <= pixel_s7.hs;
 			video_vs_out <= pixel_s7.vs;
 			video_hblank_out <= pixel_s7.hblank;

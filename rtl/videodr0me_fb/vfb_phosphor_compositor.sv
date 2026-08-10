@@ -340,8 +340,6 @@ module vfb_phosphor_compositor #(
 			read_beat <= 4'd0;
 			write_beat <= 4'd0;
 			write_data_q <= 64'd0;
-			pixel_index <= 6'd0;
-			lookahead_pixel_index <= 6'd0;
 			raw_rgb_q <= 3'd0;
 			raw_intensity_q <= 9'd0;
 			raw_factor_q <= 8'd0;

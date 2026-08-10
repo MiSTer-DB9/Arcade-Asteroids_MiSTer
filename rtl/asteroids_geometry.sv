@@ -30,6 +30,8 @@ module asteroids_geometry
 	logic signed [23:0] centered_y;
 	logic signed [23:0] scaled_x;
 	logic signed [23:0] scaled_y;
+	logic signed [23:0] horizontal_scaled_x;
+	logic signed [23:0] horizontal_scaled_y;
 	logic signed [23:0] selected_x;
 	logic signed [23:0] selected_y;
 	logic signed [23:0] presented_y;
@@ -73,8 +75,13 @@ module asteroids_geometry
 				scaled_x = ((centered_x << 3) + centered_x) >>> 5;
 				scaled_y = ((centered_y << 3) + centered_y) >>> 5;
 			end else if (!zoom_wide) begin
-				// 7/32.
-				scaled_x = ((centered_x << 3) - centered_x) >>> 5;
+				if (game_is_lander) begin
+					// Preserve Lunar Lander's existing quarter-turn framing.
+					scaled_x = ((centered_x << 3) - centered_x) >>> 5;
+				end else begin
+					// 15/64 maps source X=0..2047 to the full raster height.
+					scaled_x = ((centered_x << 4) - centered_x) >>> 6;
+				end
 				scaled_y = ((centered_y << 3) - centered_y) >>> 5;
 			end else if (!quarter_turn) begin
 				// 17/64.
@@ -105,22 +112,59 @@ module asteroids_geometry
 			end
 		end
 
+		// The 720-wide low-resolution modes retain the former 640-wide crop.
+		// Scale raster X by 720/640 directly from the source coordinate so
+		// adjacent shadow-DVG coordinates still move by at most one pixel.
+		horizontal_scaled_x = scaled_x;
+		horizontal_scaled_y = scaled_y;
+		if (mode_480p || mode_240p) begin
+			if (!zoom_wide && !quarter_turn) begin
+				if (game_is_lander) begin
+					// Preserve Lunar Lander's existing horizontal framing.
+					horizontal_scaled_x = ((centered_x << 6) +
+					                       (centered_x << 4) + centered_x) >>> 8;
+				end else begin
+					// 45/128 maps source X=0..2047 to raster X=0..719.
+					horizontal_scaled_x = (((centered_x << 5) +
+					                        (centered_x << 4)) -
+					                       ((centered_x << 1) + centered_x)) >>> 7;
+				end
+				horizontal_scaled_y = ((centered_y << 6) + (centered_y << 4) + centered_y) >>> 8;
+			end else if (!zoom_wide) begin
+				// (7/32) * (9/8) = 63/256.
+				horizontal_scaled_x = ((centered_x << 6) - centered_x) >>> 8;
+				horizontal_scaled_y = ((centered_y << 6) - centered_y) >>> 8;
+			end else if (!quarter_turn) begin
+				// (17/64) * (9/8) = 153/512.
+				horizontal_scaled_x = ((centered_x << 7) + (centered_x << 4) +
+				                       (centered_x << 3) + centered_x) >>> 9;
+				horizontal_scaled_y = ((centered_y << 7) + (centered_y << 4) +
+				                       (centered_y << 3) + centered_y) >>> 9;
+			end else begin
+				// (13/64) * (9/8) = 117/512.
+				horizontal_scaled_x = ((centered_x << 7) - (centered_x << 3) -
+				                       (centered_x << 1) - centered_x) >>> 9;
+				horizontal_scaled_y = ((centered_y << 7) - (centered_y << 3) -
+				                       (centered_y << 1) - centered_y) >>> 9;
+			end
+		end
+
 		case (orientation)
-			3'd0: begin selected_x = scaled_x; negate_x = 1'b0;
+			3'd0: begin selected_x = horizontal_scaled_x; negate_x = 1'b0;
 			             selected_y = scaled_y; negate_y = 1'b1; end
-			3'd1: begin selected_x = scaled_y; negate_x = 1'b0;
+			3'd1: begin selected_x = horizontal_scaled_y; negate_x = 1'b0;
 			             selected_y = scaled_x; negate_y = 1'b0; end
-			3'd2: begin selected_x = scaled_x; negate_x = 1'b1;
+			3'd2: begin selected_x = horizontal_scaled_x; negate_x = 1'b1;
 			             selected_y = scaled_y; negate_y = 1'b0; end
-			3'd3: begin selected_x = scaled_y; negate_x = 1'b1;
+			3'd3: begin selected_x = horizontal_scaled_y; negate_x = 1'b1;
 			             selected_y = scaled_x; negate_y = 1'b1; end
-			3'd4: begin selected_x = scaled_x; negate_x = 1'b1;
+			3'd4: begin selected_x = horizontal_scaled_x; negate_x = 1'b1;
 			             selected_y = scaled_y; negate_y = 1'b1; end
-			3'd5: begin selected_x = scaled_x; negate_x = 1'b0;
+			3'd5: begin selected_x = horizontal_scaled_x; negate_x = 1'b0;
 			             selected_y = scaled_y; negate_y = 1'b0; end
-			3'd6: begin selected_x = scaled_y; negate_x = 1'b0;
+			3'd6: begin selected_x = horizontal_scaled_y; negate_x = 1'b0;
 			             selected_y = scaled_x; negate_y = 1'b1; end
-			default: begin selected_x = scaled_y; negate_x = 1'b1;
+			default: begin selected_x = horizontal_scaled_y; negate_x = 1'b1;
 			               selected_y = scaled_x; negate_y = 1'b0; end
 		endcase
 

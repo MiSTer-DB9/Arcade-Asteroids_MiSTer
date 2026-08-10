@@ -248,188 +248,111 @@ module vfb_rasterizer #(
 	logic [7:0]  dot_base_z;
 	logic [3:0]  dot_base_c;
 	logic [10:0] dot_x, dot_y;
-	logic [11:0] dot_candidate_x;
-	logic [11:0] dot_candidate_y;
-	logic        dot_candidate_valid;
+	logic signed [2:0] dot_offset_x;
+	logic signed [2:0] dot_offset_y;
 
-	always_comb begin
-		dot_candidate_x = {1'b0, dot_x};
-		dot_candidate_y = {1'b0, dot_y};
+	function automatic logic [5:0] dot_offset_for(
+		input logic [2:0] mode,
+		input logic [4:0] index
+	);
+		logic signed [2:0] dx;
+		logic signed [2:0] dy;
+		begin
+			dx = 3'sd0;
+			dy = 3'sd0;
+			case (mode)
+			DOT_15X: dx = 3'sd1;
 
-		case (dot_mode)
-		DOT_15X: begin
-			dot_candidate_x = {1'b0, dot_x} + 12'd1;
-		end
+			DOT_2X: begin
+				case (index)
+					5'd0: dx = 3'sd1;
+					5'd1: dy = 3'sd1;
+					default: begin dx = 3'sd1; dy = 3'sd1; end
+				endcase
+			end
 
-		DOT_2X: begin
-			case (dot_idx)
-				3'd0: dot_candidate_x = {1'b0, dot_x} + 12'd1;
-				3'd1: dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				default: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
+			DOT_25X: begin
+				case (index)
+					5'd0: dx = 3'sd1;
+					5'd1: dx = 3'sd2;
+					5'd2: dy = 3'sd1;
+					5'd3: begin dx = 3'sd1; dy = 3'sd1; end
+					default: begin dx = 3'sd2; dy = 3'sd1; end
+				endcase
+			end
+
+			DOT_3X: begin
+				case (index)
+					5'd0: begin dx = -3'sd1; dy = -3'sd1; end
+					5'd1: dy = -3'sd1;
+					5'd2: begin dx = 3'sd1; dy = -3'sd1; end
+					5'd3: dx = -3'sd1;
+					5'd4: dx = 3'sd1;
+					5'd5: begin dx = -3'sd1; dy = 3'sd1; end
+					5'd6: dy = 3'sd1;
+					default: begin dx = 3'sd1; dy = 3'sd1; end
+				endcase
+			end
+
+			DOT_4X: begin
+				case (index)
+					5'd0: begin dx = -3'sd2; dy = -3'sd1; end
+					5'd1: begin dx = -3'sd1; dy = -3'sd1; end
+					5'd2: dy = -3'sd1;
+					5'd3: begin dx = 3'sd1; dy = -3'sd1; end
+					5'd4: dx = -3'sd2;
+					5'd5: dx = -3'sd1;
+					5'd6: dx = 3'sd1;
+					5'd7: begin dx = -3'sd2; dy = 3'sd1; end
+					5'd8: begin dx = -3'sd1; dy = 3'sd1; end
+					5'd9: dy = 3'sd1;
+					5'd10: begin dx = 3'sd1; dy = 3'sd1; end
+					5'd11: begin dx = -3'sd2; dy = 3'sd2; end
+					5'd12: begin dx = -3'sd1; dy = 3'sd2; end
+					5'd13: dy = 3'sd2;
+					default: begin dx = 3'sd1; dy = 3'sd2; end
+				endcase
+			end
+
+			DOT_5X: begin
+				case (index)
+					5'd0: begin dx = -3'sd1; dy = -3'sd2; end
+					5'd1: dy = -3'sd2;
+					5'd2: begin dx = 3'sd1; dy = -3'sd2; end
+					5'd3: begin dx = -3'sd2; dy = -3'sd1; end
+					5'd4: begin dx = -3'sd1; dy = -3'sd1; end
+					5'd5: dy = -3'sd1;
+					5'd6: begin dx = 3'sd1; dy = -3'sd1; end
+					5'd7: begin dx = 3'sd2; dy = -3'sd1; end
+					5'd8: dx = -3'sd2;
+					5'd9: dx = -3'sd1;
+					5'd10: dx = 3'sd1;
+					5'd11: dx = 3'sd2;
+					5'd12: begin dx = -3'sd2; dy = 3'sd1; end
+					5'd13: begin dx = -3'sd1; dy = 3'sd1; end
+					5'd14: dy = 3'sd1;
+					5'd15: begin dx = 3'sd1; dy = 3'sd1; end
+					5'd16: begin dx = 3'sd2; dy = 3'sd1; end
+					5'd17: begin dx = -3'sd1; dy = 3'sd2; end
+					5'd18: dy = 3'sd2;
+					default: begin dx = 3'sd1; dy = 3'sd2; end
+				endcase
+			end
+
+			default: begin end
 			endcase
+			dot_offset_for = {dx, dy};
 		end
+	endfunction
 
-		DOT_25X: begin
-			case (dot_idx)
-				3'd0: dot_candidate_x = {1'b0, dot_x} + 12'd1;
-				3'd1: dot_candidate_x = {1'b0, dot_x} + 12'd2;
-				3'd2: dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				3'd3: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				default: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd2;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-			endcase
-		end
-
-		DOT_3X: begin
-			case (dot_idx)
-				5'd0: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd1: dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				5'd2: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd3: dot_candidate_x = {1'b0, dot_x} - 12'd1;
-				5'd4: dot_candidate_x = {1'b0, dot_x} + 12'd1;
-				5'd5: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd6: dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				default: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-			endcase
-		end
-
-		DOT_4X: begin
-			case (dot_idx)
-				5'd0: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd2;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd1: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd2: dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				5'd3: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd4: dot_candidate_x = {1'b0, dot_x} - 12'd2;
-				5'd5: dot_candidate_x = {1'b0, dot_x} - 12'd1;
-				5'd6: dot_candidate_x = {1'b0, dot_x} + 12'd1;
-				5'd7: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd2;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd8: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd9: dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				5'd10: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd11: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd2;
-					dot_candidate_y = {1'b0, dot_y} + 12'd2;
-				end
-				5'd12: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd2;
-				end
-				5'd13: dot_candidate_y = {1'b0, dot_y} + 12'd2;
-				default: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd2;
-				end
-			endcase
-		end
-
-		DOT_5X: begin
-			case (dot_idx)
-				5'd0: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd2;
-				end
-				5'd1: dot_candidate_y = {1'b0, dot_y} - 12'd2;
-				5'd2: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd2;
-				end
-				5'd3: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd2;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd4: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd5: dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				5'd6: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd7: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd2;
-					dot_candidate_y = {1'b0, dot_y} - 12'd1;
-				end
-				5'd8: dot_candidate_x = {1'b0, dot_x} - 12'd2;
-				5'd9: dot_candidate_x = {1'b0, dot_x} - 12'd1;
-				5'd10: dot_candidate_x = {1'b0, dot_x} + 12'd1;
-				5'd11: dot_candidate_x = {1'b0, dot_x} + 12'd2;
-				5'd12: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd2;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd13: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd14: dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				5'd15: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd16: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd2;
-					dot_candidate_y = {1'b0, dot_y} + 12'd1;
-				end
-				5'd17: begin
-					dot_candidate_x = {1'b0, dot_x} - 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd2;
-				end
-				5'd18: dot_candidate_y = {1'b0, dot_y} + 12'd2;
-				default: begin
-					dot_candidate_x = {1'b0, dot_x} + 12'd1;
-					dot_candidate_y = {1'b0, dot_y} + 12'd2;
-				end
-			endcase
-		end
-
-		default: begin
-			dot_candidate_x = {1'b0, dot_x};
-			dot_candidate_y = {1'b0, dot_y};
-		end
-		endcase
-	end
-
-	assign dot_candidate_valid = (dot_candidate_x < FB_WIDTH) &&
-	                             (dot_candidate_y < FB_HEIGHT);
+	wire [5:0] dot_first_offset = dot_offset_for(a_dot, 5'd0);
+	wire [5:0] dot_next_offset = dot_offset_for(dot_mode, dot_idx + 5'd1);
+	wire [11:0] dot_candidate_x = {1'b0, dot_x} +
+		{{9{dot_offset_x[2]}}, dot_offset_x};
+	wire [11:0] dot_candidate_y = {1'b0, dot_y} +
+		{{9{dot_offset_y[2]}}, dot_offset_y};
+	wire dot_candidate_valid = (dot_candidate_x < FB_WIDTH) &&
+	                           (dot_candidate_y < FB_HEIGHT);
 
 	// Classify the current step.
 	wire [10:0] step_dx = (a_x > read_last_x) ? (a_x - read_last_x)
@@ -484,6 +407,7 @@ module vfb_rasterizer #(
 							b_state      <= B_DOT_SUB;
 							dot_mode     <= a_dot;
 							dot_idx      <= 5'd0;
+							{dot_offset_x, dot_offset_y} <= dot_first_offset;
 							dot_last_idx <= (a_dot == DOT_15X) ? 5'd0 :
 							                (a_dot == DOT_2X)  ? 5'd2 :
 							                (a_dot == DOT_25X) ? 5'd4 :
@@ -552,6 +476,7 @@ module vfb_rasterizer #(
 						b_state <= B_IDLE;
 					end else begin
 						dot_idx <= dot_idx + 5'd1;
+						{dot_offset_x, dot_offset_y} <= dot_next_offset;
 					end
 				end
 			end

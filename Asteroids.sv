@@ -39,15 +39,8 @@ module emu
 	logic pll_locked;
 
 	logic [2:0] profile;
-	logic       profile_off;
-	logic       profile_touch;
-	logic       profile_typical;
-	logic       profile_overdriven;
-	logic       profile_ultraviolet;
-	logic       profile_red_alert;
 	logic       profile_custom_1;
 	logic       profile_custom_2;
-	logic       profile_flashing;
 	logic [2:0] custom_bloom_width;
 	logic [2:0] custom_halo;
 	logic       custom_active;
@@ -60,7 +53,11 @@ module emu
 	logic [27:0] custom_2_settings;
 	logic        custom_artwork_enable;
 	logic  [2:0] custom_artwork_blend;
-	logic        video_is_720p;
+	logic        video_supports_120hz;
+	logic        video_is_15khz;
+	logic        video_is_480line;
+	logic        video_field;
+	logic        video_mode_restart;
 	logic        artwork_available;
 	logic        artwork_available_meta = 1'b0;
 	logic        artwork_available_ui = 1'b0;
@@ -76,15 +73,8 @@ module emu
 	assign game_is_deluxe = (game_id == 8'd1);
 	assign game_is_lander = (game_id == 8'd2);
 	assign profile = status[68:66] + 3'd2;
-	assign profile_off        = (profile == 3'd0);
-	assign profile_touch      = (profile == 3'd1);
-	assign profile_typical    = (profile == 3'd2);
-	assign profile_overdriven = (profile == 3'd3);
-	assign profile_ultraviolet = (profile == 3'd5);
-	assign profile_red_alert   = (profile == 3'd4);
 	assign profile_custom_1   = (profile == 3'd6);
 	assign profile_custom_2   = (profile == 3'd7);
-	assign profile_flashing   = profile_ultraviolet || profile_red_alert;
 
 	assign custom_bloom_width = profile_custom_2 ? status[99:97] : status[76:74];
 	assign custom_halo = profile_custom_2 ? status[105:103] : status[82:80];
@@ -120,73 +110,73 @@ module emu
 		"P3,Video Profiles & Effects;",
 		"P3-;",
 		"P3O[68:66],Profile,80s Cruise Control,80s Overdrive,Red Alert,Ultraviolet,Custom 1,Custom 2,Off,A Touch of CRT;",
-		"h7P3O[30:28],Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
-		"h7P3O[38:37],Tone Mapping,Off,Linear 1,Linear 2,Bright;",
-		"h7P3O[119:118],Inter-Frame Decay,Off,Short,Medium,Long;",
-		"h7P3O[56:55],Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
-		"h7P3-;",
-		"h7P3-,For advanced settings and;",
-		"h7P3-,artwork options select;",
-		"h7P3-,Custom Profiles 1/2;",
-		"h8P3-;",
-		"h8P3-,Modern clarity with a touch;",
-		"h8P3-,of old. Subtle halo & bloom;",
-		"h8P3-,while vectors stay crisp.;",
-		"h8P3-;",
-		"h8P3-, For advanced settings;",
-		"h8P3-, select Custom Profiles 1/2;",
-		"h9P3-;",
-		"h9P3-,The familiar vector CRT glow;",
-		"h9P3-,richer halo, stronger bloom;",
-		"h9P3-,and a restrained trail.;",
-		"h9P3-;",
-		"h9P3-, For advanced settings;",
-		"h9P3-, select Custom Profiles 1/2;",
-		"hAP3-;",
-		"hAP3-,The arcade look you remember;",
-		"hAP3-,hot vectors and heavy bloom;",
-		"hAP3-,phosphor trails linger.;",
-		"hAP3-;",
-		"hAP3-, For advanced settings;",
-		"hAP3-, select Custom Profiles 1/2;",
-		"hAP3-;",
-		"hBP3-;",
-		"hBP3-,Voltage up. Rules dissolve.;",
-		"hBP3-,Red or ultraviolet visions;",
-		"hBP3-,glow beyond the real world.;",
-		"hBP3-;",
-		"hBP3-,     Epilepsy warning:;",
-		"hBP3-,    excessive flashing;",
-		"hBP3-,       bright lights;",
-		"hBP3-;",
-		"hBP3-,   Use Custom Profiles 1/2;",
-		"hBP3-, to create your own effects;",
-		"hDDCP3O[123],> Background,Off,On;",
-		"hDDCP3O[126:124],> Background Blend,0,+1,+2,+3,-4,-3,-2,-1;",
-		"hDP3O[71:69],> Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
-		"hDP3O[73:72],> Tone Mapping,Off,Linear 1,Linear 2,Bright;",
-		"hDP3O[76:74],> Bloom Width,Off,Thin,Tight,Soft,Normal,Broad,Wide-,Wide;",
-		"hDH5P3O[79:77],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
-		"hDP3O[82:80],> Halo,Off,0.25x,0.33x,0.5x,0.75x,1.0x,1.25x,1.5x;",
-		"hDH6P3O[43:41],> Halo Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
-		"hDH6P3O[84:83],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
-		"hDH6P3O[48:47],> Halo Compression,Off,8,16,24;",
-		"hDP3O[86:85],> Inter-Frame Decay,Off,Short,Medium,Long;",
-		"hDP3O[88:87],> Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
-		"hDP3O[91:89],> Vector Color,White,Deluxe Blue,Lunar Green,Red,Purple,Cyan,Yellow;",
-		"hEDCP3O[57],> Background,Off,On;",
-		"hEDCP3O[60:58],> Background Blend,0,+1,+2,+3,-4,-3,-2,-1;",
-		"hEP3O[94:92],> Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
-		"hEP3O[96:95],> Tone Mapping,Off,Linear 1,Linear 2,Bright;",
-		"hEP3O[99:97],> Bloom Width,Off,Thin,Tight,Soft,Normal,Broad,Wide-,Wide;",
-		"hEH5P3O[102:100],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
-		"hEP3O[105:103],> Halo,Off,0.25x,0.33x,0.5x,0.75x,1.0x,1.25x,1.5x;",
-		"hEH6P3O[46:44],> Halo Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
-		"hEH6P3O[107:106],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
-		"hEH6P3O[50:49],> Halo Compression,Off,8,16,24;",
-		"hEP3O[109:108],> Inter-Frame Decay,Off,Short,Medium,Long;",
-		"hEP3O[111:110],> Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
-		"hEP3O[114:112],> Vector Color,White,Deluxe Blue,Lunar Green,Red,Purple,Cyan,Yellow;",
+		"H9H8H7P3O[30:28],Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
+		"H9H8H7P3O[38:37],Tone Mapping,Off,Linear 1,Linear 2,Bright;",
+		"H9H8H7P3O[119:118],Inter-Frame Decay,Off,Short,Medium,Long;",
+		"H9H8H7P3O[56:55],Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
+		"H9H8H7P3-;",
+		"H9H8H7P3-,For advanced settings and;",
+		"H9H8H7P3-,artwork options select;",
+		"H9H8H7P3-,Custom Profiles 1/2;",
+		"H9H8h7P3-;",
+		"H9H8h7P3-,Modern clarity with a touch;",
+		"H9H8h7P3-,of old. Subtle halo & bloom;",
+		"H9H8h7P3-,while vectors stay crisp.;",
+		"H9H8h7P3-;",
+		"H9H8h7P3-, For advanced settings;",
+		"H9H8h7P3-, select Custom Profiles 1/2;",
+		"H9h8H7P3-;",
+		"H9h8H7P3-,The familiar vector CRT glow;",
+		"H9h8H7P3-,richer halo, stronger bloom;",
+		"H9h8H7P3-,and a restrained trail.;",
+		"H9h8H7P3-;",
+		"H9h8H7P3-, For advanced settings;",
+		"H9h8H7P3-, select Custom Profiles 1/2;",
+		"H9h8h7P3-;",
+		"H9h8h7P3-,The arcade look you remember;",
+		"H9h8h7P3-,hot vectors and heavy bloom;",
+		"H9h8h7P3-,phosphor trails linger.;",
+		"H9h8h7P3-;",
+		"H9h8h7P3-, For advanced settings;",
+		"H9h8h7P3-, select Custom Profiles 1/2;",
+		"H9h8h7P3-;",
+		"h9H8P3-;",
+		"h9H8P3-,Voltage up. Rules dissolve.;",
+		"h9H8P3-,Red or ultraviolet visions;",
+		"h9H8P3-,glow beyond the real world.;",
+		"h9H8P3-;",
+		"h9H8P3-,     Epilepsy warning:;",
+		"h9H8P3-,    excessive flashing;",
+		"h9H8P3-,       bright lights;",
+		"h9H8P3-;",
+		"h9H8P3-,   Use Custom Profiles 1/2;",
+		"h9H8P3-, to create your own effects;",
+		"h9h8H7DAP3O[123],> Background,Off,On;",
+		"h9h8H7DAP3O[126:124],> Background Blend,0,+1,+2,+3,-4,-3,-2,-1;",
+		"h9h8H7P3O[71:69],> Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
+		"h9h8H7P3O[73:72],> Tone Mapping,Off,Linear 1,Linear 2,Bright;",
+		"h9h8H7P3O[76:74],> Bloom Width,Off,Thin,Tight,Soft,Normal,Broad,Wide-,Wide;",
+		"h9h8H7H5P3O[79:77],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"h9h8H7P3O[82:80],> Halo,Off,0.25x,0.33x,0.5x,0.75x,1.0x,1.25x,1.5x;",
+		"h9h8H7H6P3O[43:41],> Halo Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"h9h8H7H6P3O[84:83],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
+		"h9h8H7H6P3O[48:47],> Halo Compression,Off,8,16,24;",
+		"h9h8H7P3O[86:85],> Inter-Frame Decay,Off,Short,Medium,Long;",
+		"h9h8H7P3O[88:87],> Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
+		"h9h8H7P3O[91:89],> Vector Color,White,Deluxe Blue,Lunar Green,Red,Purple,Cyan,Yellow;",
+		"h9h8h7DAP3O[57],> Background,Off,On;",
+		"h9h8h7DAP3O[60:58],> Background Blend,0,+1,+2,+3,-4,-3,-2,-1;",
+		"h9h8h7P3O[94:92],> Dot Scale,2x,2.5x,3x,4x,5x,1x,1.5x;",
+		"h9h8h7P3O[96:95],> Tone Mapping,Off,Linear 1,Linear 2,Bright;",
+		"h9h8h7P3O[99:97],> Bloom Width,Off,Thin,Tight,Soft,Normal,Broad,Wide-,Wide;",
+		"h9h8h7H5P3O[102:100],> Bloom Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"h9h8h7P3O[105:103],> Halo,Off,0.25x,0.33x,0.5x,0.75x,1.0x,1.25x,1.5x;",
+		"h9h8h7H6P3O[46:44],> Halo Curve,Minimal,Min+,Mild,Mild+,Moderate,Mod+,Strong-,Strong;",
+		"h9h8h7H6P3O[107:106],> Halo Spread,Original,Wide 1,Wide 2,Wide 3;",
+		"h9h8h7H6P3O[50:49],> Halo Compression,Off,8,16,24;",
+		"h9h8h7P3O[109:108],> Inter-Frame Decay,Off,Short,Medium,Long;",
+		"h9h8h7P3O[111:110],> Intra-Frame Decay,Off,LUT A,LUT B,LUT C;",
+		"h9h8h7P3O[114:112],> Vector Color,White,Deluxe Blue,Lunar Green,Red,Purple,Cyan,Yellow;",
 		"P6,Video Timing & Geometry;",
 		"P6-;",
 		"P6O[7:5],Orientation,Normal,Rotate 90 CW,Rotate 180,Rotate 90 CCW,Mirror Horizontal,Mirror Vertical,Mirror H + 90 CW,Mirror H + 90 CCW;",
@@ -194,8 +184,11 @@ module emu
 		"P6-;",
 		"P6O[40:39],Buffer Mode,EOF + VBL,VBL,EOF;",
 		"D3P6O[25],120Hz (720p only),Off,On;",
-		"D1P6O[122],61.52Hz (Authentic),Off,On;",
+		"h2D1P6O[122],61.52Hz (Authentic),Off,On;",
 		"h0P6O[115],Direct Video Scan Rate,15 kHz,31 kHz;",
+		"hCP6O[127],15 kHz Format,480i,240p;",
+		"hDP6O[12:10],CRT Vertical Position,0,+4,+8,+12,-4,-8,-10;",
+		"hEP6O[12:10],CRT Vertical Position,0,+2,+4,+6,-2,-4,-6;",
 		"P6-;",
 		"P6-,Best left at default:;",
 		"P6O[15:14],Aspect Ratio,Optimized,Stretched,Pixel Perfect;",
@@ -227,9 +220,9 @@ module emu
 		"P5-,future updates:;",
 		"P5-;",
 		"P5-,buymeacoffee.com/videodr0me;",
-		"hF-;",
-		"hFOR,Autosave NVRAM,Off,On;",
-		"hFT4,Save NVRAM;",
+		"hB-;",
+		"hBOR,Autosave NVRAM,Off,On;",
+		"hBT4,Save NVRAM;",
 		"-;",
 		"P1,Pause Options;",
 		"P1O[116],Pause when OSD is open,Off,On;",
@@ -243,7 +236,7 @@ module emu
 		"Cadet Mission:\nModerate Gravity\nNo Friction\nControlled Rotation,",
 		"Prime Mission:\nStrong Gravity\nNo Friction\nControlled Rotation,",
 		"Command Mission:\nModerate Gravity\nNo Friction\nRotational Momentum;",
-		"V,v1.1.", `BUILD_DATE
+		"V,v1.2.", `BUILD_DATE
 	};
 
 	hps_io #(.CONF_STR(CONF_STR)) hps_io_inst (
@@ -263,14 +256,15 @@ module emu
 		.status(status),
 		.info_req(info_req),
 		.info(info),
+		// Profile bits control visibility of the custom settings.
 		.status_menumask({
-			game_is_deluxe, profile_custom_2, profile_custom_1,
-			!artwork_available_ui,
-			profile_flashing, profile_overdriven, profile_typical, profile_touch,
-			profile_off, custom_halo_off, custom_bloom_off,
+			1'b0, video_is_15khz && !video_is_480line,
+			video_is_480line, video_is_15khz, game_is_deluxe,
+			!artwork_available_ui, profile[2], profile[1], profile[0],
+			custom_halo_off, custom_bloom_off,
 			status[34],
-			!video_is_720p, !game_is_lander,
-			(status[25] && video_is_720p) || game_is_lander,
+			!video_supports_120hz, !game_is_lander,
+			(status[25] && video_supports_120hz) || game_is_lander,
 			direct_video
 		}),
 		.ioctl_download(ioctl_download),
@@ -327,6 +321,9 @@ module emu
 	logic [7:0] raw_video_g;
 	logic [7:0] raw_video_b;
 	logic machine_reset;
+	logic machine_reset_base;
+	(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+	logic [1:0] video_mode_restart_12 = 2'b00;
 	logic pause_cpu;
 	logic rom_download;
 	logic variant_download;
@@ -340,9 +337,14 @@ module emu
 	assign variant_download = ioctl_download && (ioctl_index == 16'd1);
 	assign nvram_download = ioctl_download && (ioctl_index == 16'd4);
 	assign nvram_host_write = nvram_download && ioctl_wr;
-	assign machine_reset = RESET || status[0] || buttons[1] ||
-	                       rom_download || variant_download ||
-	                       nvram_download || !pll_locked;
+	assign machine_reset_base = RESET || status[0] || buttons[1] ||
+	                            rom_download || variant_download ||
+	                            nvram_download || !pll_locked;
+
+	always_ff @(posedge clk_12)
+		video_mode_restart_12 <= {video_mode_restart_12[0], video_mode_restart};
+
+	assign machine_reset = machine_reset_base || video_mode_restart_12[1];
 
 	always_ff @(posedge clk_12) begin
 		if (!game_is_deluxe || variant_download) begin
@@ -508,6 +510,8 @@ module emu
 		.hdmi_height(HDMI_HEIGHT),
 		.mode_120hz(status[25]),
 		.authentic_timing(status[122] && !game_is_lander),
+		.crt_15khz_480i(!status[127]),
+		.crt_vertical_position(status[12:10]),
 		.aspect_ratio(status[15:14]),
 		.buffer_mode(status[40:39]),
 		.geometry_orientation(status[7:5]),
@@ -544,12 +548,16 @@ module emu
 		.video_b(raw_video_b),
 		.hsync(VGA_HS),
 		.vsync(VGA_VS),
-		.mode_is_720p(video_is_720p),
+		.field(video_field),
+		.mode_supports_120hz(video_supports_120hz),
+		.mode_is_15khz(video_is_15khz),
+		.mode_is_480line(video_is_480line),
 		.fifo_full(fifo_full),
 		.artwork_available(artwork_available),
 		.ioctl_wait(artwork_ioctl_wait),
 		.video_mode_toggle(video_mode_toggle),
 		.video_freeze(video_freeze),
+		.mode_restart(video_mode_restart),
 		.ddram_clk(DDRAM_CLK),
 		.ddram_busy(DDRAM_BUSY),
 		.ddram_burst_count(DDRAM_BURSTCNT),
@@ -578,7 +586,7 @@ module emu
 	assign VGA_G = paused_rgb[15:8];
 	assign VGA_B = paused_rgb[7:0];
 	assign VGA_DE = !(video_hblank || video_vblank);
-	assign VGA_F1 = 1'b0;
+	assign VGA_F1 = video_field;
 	assign VGA_SL = 2'b00;
 	assign VGA_SCALER = 1'b0;
 	assign VGA_DISABLE = 1'b0;

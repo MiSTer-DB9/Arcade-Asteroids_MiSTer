@@ -288,6 +288,7 @@ module vfb_top (
 	wire [BUF_IDX_W-1:0] clear_buf_idx;
 	wire clear_done;
 	wire has_draw_buf;
+	wire [BUFFER_COUNT-1:0] buf_draw_hot;
 	wire display_valid;
 	wire display_is_composed;
 	wire [TILEMAP_ADDR_W-1:0] compose_tilemap_addr;
@@ -329,6 +330,7 @@ module vfb_top (
 		.display_is_composed(display_is_composed),
 
 		.has_draw_buf(has_draw_buf),
+		.buf_draw_hot(buf_draw_hot),
 		.raw_frame_dropped(raw_frame_dropped),
 		.raw_frame_dropped_buf(raw_frame_dropped_buf),
 		.readout_frame_start(readout_frame_start)
@@ -370,6 +372,7 @@ module vfb_top (
 		.buf_display(buf_display),
 		.display_valid(display_valid),
 		.has_draw_buf(has_draw_buf),
+		.buf_draw_hot(buf_draw_hot),
 
 		// DDRAM arbiter
 		.fill_ready(fill_ready),

@@ -1892,6 +1892,8 @@ module vfb_halo_wide #(
 	logic halo_out_valid;
 	logic [23:0] halo_pending_rgb;
 	logic halo_pending_valid;
+	logic [COARSE_W-1:0] segment_prefetch_addr;
+	logic segment_prefetch_in_range;
 	logic segment_read_valid;
 	logic segment_read_in_range;
 	logic [COARSE_W-1:0] segment_read_addr;
@@ -2063,6 +2065,8 @@ module vfb_halo_wide #(
 			halo_out_valid <= 1'b0;
 			halo_pending_rgb <= 24'd0;
 			halo_pending_valid <= 1'b0;
+			segment_prefetch_addr <= '0;
+			segment_prefetch_in_range <= 1'b0;
 			segment_read_valid <= 1'b0;
 			segment_read_in_range <= 1'b0;
 			segment_read_addr <= '0;
@@ -2149,35 +2153,41 @@ module vfb_halo_wide #(
 					vertical_blend_s0_delta_b,
 					vertical_blend_s0_weight);
 
-			// Prepare the next 16-pixel span over the final four pixels:
-			//   x+12: register the coarse row address
+			// Prepare the next 16-pixel span before the current span ends:
+			//   x+11: choose the coarse row address
+			//   x+12: register the row address
 			//   x+13: read and register row RAM
 			//   x+14: compute the next ramp
 			//   x+15: load it for the following span
-			// This keeps the RAM read separate from interpolation setup.
 			if (reconstruction_step_q &&
-			    reconstruction_x_q[3:0] == 4'd12) begin
+			    reconstruction_x_q[3:0] == 4'd11) begin
 				logic [COARSE_W-1:0] prefetch_address;
 				logic [COARSE_W-1:0] last_address;
 
-				segment_read_valid <= 1'b1;
 				if (coarse_width == '0) begin
-					segment_read_addr <= '0;
-					segment_read_in_range <= 1'b0;
+					segment_prefetch_addr <= '0;
+					segment_prefetch_in_range <= 1'b0;
 				end else if (reconstruction_x_q[11:4] < 4) begin
-					segment_read_addr <= coarse_width +
+					segment_prefetch_addr <= coarse_width +
 						reconstruction_x_q[COARSE_W+3:4];
-					segment_read_in_range <= 1'b1;
+					segment_prefetch_in_range <= 1'b1;
 				end else begin
 					last_address = coarse_width - 1'b1;
 					prefetch_address =
 						reconstruction_x_q[COARSE_W+3:4] - 3'd4;
 					if (prefetch_address >= coarse_width)
-						segment_read_addr <= last_address;
+						segment_prefetch_addr <= last_address;
 					else
-						segment_read_addr <= prefetch_address;
-					segment_read_in_range <= 1'b1;
+						segment_prefetch_addr <= prefetch_address;
+					segment_prefetch_in_range <= 1'b1;
 				end
+			end
+
+			if (reconstruction_step_q &&
+			    reconstruction_x_q[3:0] == 4'd12) begin
+				segment_read_valid <= 1'b1;
+				segment_read_addr <= segment_prefetch_addr;
+				segment_read_in_range <= segment_prefetch_in_range;
 			end
 
 			case ({display_epoch, display_latest_bank})

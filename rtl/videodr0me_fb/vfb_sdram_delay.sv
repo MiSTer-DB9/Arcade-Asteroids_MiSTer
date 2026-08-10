@@ -158,6 +158,10 @@ module vfb_sdram_delay #(
 		write_fifo_pair_index,
 		write_fifo_pair_data
 	};
+	wire write_pair_eol_q =
+		write_pair_valid_q && write_pair_data_q[WRITE_FIFO_W-1];
+	wire [SLOT_W-1:0] write_pair_slot_q =
+		write_pair_data_q[WRITE_FIFO_W-2 -: SLOT_W];
 	wire [WORD_W:0] packed_line_words =
 		{1'b0, encode_word_index} + {{WORD_W{1'b0}}, 1'b1};
 	wire write_fifo_pop;
@@ -254,6 +258,9 @@ module vfb_sdram_delay #(
 	logic descriptor_apply_vblank;
 	logic descriptor_apply_valid;
 	logic descriptor_apply_written;
+	logic [WORD_W:0] descriptor_commit_words_q;
+	logic descriptor_commit_vsync_q;
+	logic descriptor_commit_vblank_q;
 
 	// Read preparation runs one line ahead. A selected line enters prefetch_line,
 	// moves to pending_line at the next line start, and is shown at the following
@@ -641,6 +648,9 @@ module vfb_sdram_delay #(
 			descriptor_apply_vblank <= 1'b1;
 			descriptor_apply_valid <= 1'b0;
 			descriptor_apply_written <= 1'b0;
+			descriptor_commit_words_q <= '0;
+			descriptor_commit_vsync_q <= 1'b1;
+			descriptor_commit_vblank_q <= 1'b1;
 			prefetch_line_valid <= 1'b0;
 			prefetch_line_vsync <= 1'b1;
 			prefetch_line_vblank <= 1'b1;
@@ -721,18 +731,26 @@ module vfb_sdram_delay #(
 				end
 
 				if (enc_token_eol) begin
-					descriptor_words[finalize_slot] <=
-						packed_line_words;
-					descriptor_vsync[finalize_slot] <= finalize_vsync;
-					descriptor_vblank[finalize_slot] <= finalize_vblank;
-					descriptor_valid[finalize_slot] <= 1'b1;
-					descriptor_written[finalize_slot] <= 1'b0;
+					descriptor_commit_words_q <= packed_line_words;
+					descriptor_commit_vsync_q <= finalize_vsync;
+					descriptor_commit_vblank_q <= finalize_vblank;
 					finalize_pending <= 1'b0;
 					encode_slot <= encode_slot + 1'b1;
 					encode_word_index <= '0;
 				end else begin
 					encode_word_index <= encode_word_index + 1'b1;
 				end
+			end
+
+			if (write_pair_eol_q) begin
+				descriptor_words[write_pair_slot_q] <=
+					descriptor_commit_words_q;
+				descriptor_vsync[write_pair_slot_q] <=
+					descriptor_commit_vsync_q;
+				descriptor_vblank[write_pair_slot_q] <=
+					descriptor_commit_vblank_q;
+				descriptor_valid[write_pair_slot_q] <= 1'b1;
+				descriptor_written[write_pair_slot_q] <= 1'b0;
 			end
 
 			if (write_request_accepted && issue_write_eol)
